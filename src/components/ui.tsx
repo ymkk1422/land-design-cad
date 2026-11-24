@@ -3,6 +3,7 @@ import type { JSX } from 'react';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { LengthUnit } from '@/types';
 import { fromUnit, parseAngle, parseLength, toUnit } from '@/engine/area-calculation';
+import { useCoarsePointer, useKeypad, type KeypadMode } from '@/components/keypad/NumericKeypad';
 
 export function cx(...c: (string | false | null | undefined)[]): string {
   return c.filter(Boolean).join(' ');
@@ -91,36 +92,43 @@ export function LengthInput({
   useEffect(() => {
     if (!focused.current) setText(shown);
   }, [shown]);
-  const commit = (): void => {
+  const commitText = (t: string): boolean => {
     focused.current = false;
-    if (!text.trim()) {
+    if (!t.trim()) {
       if (allowEmpty) {
         setErr(false);
+        setText('');
         if (value !== null) onChange(null);
-      } else setText(shown);
-      return;
+        return true;
+      }
+      setText(shown);
+      return false;
     }
-    const v = parseLength(text, unit);
+    const v = parseLength(t, unit);
     if (v === null || (min !== undefined && v < min)) {
       setErr(true);
-      return;
+      setText(t);
+      return false;
     }
     setErr(false);
+    setText(t);
     if (value === null || Math.abs(v - value) > 1e-12) onChange(v);
+    return true;
   };
+  const kp = useKeypadField(label ?? '', 'decimal', unit, text, commitText);
   return (
     <label className={cx('flex items-center gap-1', className)}>
       {label && <span className="w-12 shrink-0 text-[13px] text-neutral-600">{label}</span>}
       <input
         data-testid={testId}
-        inputMode="decimal"
+        {...kp}
         enterKeyHint="next"
-        className={cx('w-full min-w-0 rounded border px-2 h-10 text-[16px] font-mono tabular-nums', err ? 'border-signal bg-red-50' : 'border-neutral-300')}
+        className={cx('w-full min-w-0 rounded border px-2 h-11 text-[16px] font-mono tabular-nums data-[kp-active]:ring-2 data-[kp-active]:ring-teal', err ? 'border-signal bg-red-50' : 'border-neutral-300')}
         value={text}
         placeholder={placeholder ?? '未入力'}
         onFocus={() => (focused.current = true)}
         onChange={(e) => setText(e.target.value)}
-        onBlur={commit}
+        onBlur={() => !kp.readOnly && commitText(text)}
         onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
       />
       <span className="w-7 shrink-0 text-[13px] text-neutral-500">{unit}</span>
@@ -140,6 +148,7 @@ export function NumInput({
   testId,
   className,
   placeholder,
+  keypadMode,
 }: {
   value: number | null;
   onChange: (v: number | null) => void;
@@ -151,6 +160,7 @@ export function NumInput({
   testId?: string;
   className?: string;
   placeholder?: string;
+  keypadMode?: KeypadMode;
 }): JSX.Element {
   const shown = fmtNum(value, digits);
   const [text, setText] = useState(shown);
@@ -159,36 +169,43 @@ export function NumInput({
   useEffect(() => {
     if (!focused.current) setText(shown);
   }, [shown]);
-  const commit = (): void => {
+  const commitText = (t: string): boolean => {
     focused.current = false;
-    if (!text.trim()) {
+    if (!t.trim()) {
       if (allowEmpty) {
         setErr(false);
+        setText('');
         if (value !== null) onChange(null);
-      } else setText(shown);
-      return;
+        return true;
+      }
+      setText(shown);
+      return false;
     }
-    const norm = text.replace(/[０-９．－]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0));
+    const norm = t.replace(/[０-９．－]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0));
     const v = parse ? parse(norm) : Number(norm);
     if (v === null || !Number.isFinite(v)) {
       setErr(true);
-      return;
+      setText(t);
+      return false;
     }
     setErr(false);
+    setText(t);
     if (value === null || Math.abs(v - value) > 1e-12) onChange(v);
+    return true;
   };
+  const kp = useKeypadField(label ?? placeholder ?? '', keypadMode ?? (parse ? 'angle' : 'signed'), suffix, text, commitText);
   return (
     <label className={cx('flex items-center gap-1', className)}>
       {label && <span className="w-12 shrink-0 text-[13px] text-neutral-600">{label}</span>}
       <input
         data-testid={testId}
-        inputMode={parse ? 'text' : 'decimal'}
-        className={cx('w-full min-w-0 rounded border px-2 h-10 text-[16px] font-mono tabular-nums', err ? 'border-signal bg-red-50' : 'border-neutral-300')}
+        {...kp}
+        className={cx('w-full min-w-0 rounded border px-2 h-11 text-[16px] font-mono tabular-nums data-[kp-active]:ring-2 data-[kp-active]:ring-teal', err ? 'border-signal bg-red-50' : 'border-neutral-300')}
         value={text}
         placeholder={placeholder ?? (allowEmpty ? '未入力' : '')}
         onFocus={() => (focused.current = true)}
         onChange={(e) => setText(e.target.value)}
-        onBlur={commit}
+        onBlur={() => !kp.readOnly && commitText(text)}
         onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
       />
       {suffix && <span className="shrink-0 text-[13px] text-neutral-500">{suffix}</span>}
@@ -262,3 +279,21 @@ export function Confirm({ open, title, body, okLabel = 'OK', danger, onOk, onCan
 }
 
 export const fromM = fromUnit;
+
+/**
+ * タッチ端末では OS キーボードを出さず（readOnly + inputMode=none）、タップでアプリ内テンキーを開く。
+ * PC では通常の入力欄（数字キーボード指定）として動作。
+ */
+function useKeypadField(label: string, mode: KeypadMode, suffix: string | undefined, text: string, commit: (t: string) => boolean) {
+  const coarse = useCoarsePointer();
+  const open = useKeypad((s) => s.open);
+  if (!coarse) return { inputMode: 'decimal' as const, readOnly: false, 'data-kp': '1' };
+  return {
+    inputMode: 'none' as const,
+    readOnly: true,
+    'data-kp': '1',
+    onClick: (e: React.MouseEvent<HTMLInputElement>) => {
+      open({ label, mode, suffix, initial: text, commit, anchor: e.currentTarget });
+    },
+  };
+}

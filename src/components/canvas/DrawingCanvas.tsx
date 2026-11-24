@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ObstacleKind, ProjectDoc, SiteElementKind, Vec2 } from '@/types';
 import { buildModel, currentSite, modelExtent, type Prim } from '@/engine/export/drawingModel';
 import { useProject } from '@/stores/projectStore';
-import { moveStalls, newId, snapValue } from '@/engine/parking-optimizer/stallOps';
+import { moveStalls, newId, rotateStalls, snapValue } from '@/engine/parking-optimizer/stallOps';
 import { solveLand } from '@/engine/constraints/solver';
 import { deleteVertexLand, insertVertexLand, moveVertexLand, remapEdges } from '@/engine/constraints/vertexEdit';
 import { vertexName } from '@/engine/geometry/polygon';
@@ -55,6 +55,7 @@ function renderPrim(p: Prim, k: number, view: View): JSX.Element | null {
         strokeDasharray={dash}
         strokeLinejoin="round"
         {...hit}
+        data-pid={p.id}
         pointerEvents={p.id && p.layer !== 'site' ? 'all' : 'none'}
         style={p.id && p.layer !== 'site' ? { cursor: 'pointer' } : undefined}
       />
@@ -136,12 +137,17 @@ export function DrawingCanvas({ problems }: { problems: Set<string> }): JSX.Elem
       fit();
     };
     window.addEventListener('ldc:fit', h);
+    const hu = (): void => {
+      if (!userMoved.current) fit();
+    };
+    window.addEventListener('ldc:fit-if-untouched', hu);
     const r = (e: Event): void => setView((v) => ({ ...v, rot: (e as CustomEvent<number>).detail === 0 ? 0 : (v.rot + (e as CustomEvent<number>).detail) % 360 }));
     window.addEventListener('ldc:rotate', r);
     const z = (e: Event): void => (userMoved.current = true, setView((v) => ({ ...v, s: Math.min(400, Math.max(0.3, v.s * (e as CustomEvent<number>).detail)) })));
     window.addEventListener('ldc:zoom', z);
     return () => {
       window.removeEventListener('ldc:fit', h);
+      window.removeEventListener('ldc:fit-if-untouched', hu);
       window.removeEventListener('ldc:rotate', r);
       window.removeEventListener('ldc:zoom', z);
     };
@@ -167,35 +173,89 @@ export function DrawingCanvas({ problems }: { problems: Set<string> }): JSX.Elem
   };
 
   // ---- ポインタ処理 ----
-  const pointers = useRef(new Map<number, { x: number; y: number }>());
+  // 操作ルール（iPhone 前提）
+  //  ・2本指：ピンチで拡大縮小、2本指ドラッグで図面移動。2本目の指が触れたら進行中の1本指操作は取り消す
+  //  ・1本指：選択済みの枠をドラッグで移動／未選択の枠はタップで選択（ドラッグした場合は図面移動）
+  //  ・回転ハンドル：選択中の枠を回転（1°刻み、15°の倍数に吸着）
+  //  ・追加ツール：指を離した位置に配置（ピンチ開始時に誤って配置しない）
+  //  ・長押し：枠を複数選択に追加／解除
+  const pointers = useRef(new Map<number, { x: number; y: number; type: string }>());
+  type ItemKind = 'stall' | 'obstacle' | 'element' | 'aisle';
   const gesture = useRef<
-    | { type: 'pan'; start: Vec2; view: View; moved: boolean }
+    | { type: 'pan'; start: Vec2; view: View; moved: boolean; tap?: { kind: ItemKind; id: string } | 'empty' | 'add' }
     | { type: 'pinch'; d0: number; mid0: Vec2; view: View }
-    | { type: 'move'; start: Vec2; ids: Set<string>; kind: 'stall' | 'obstacle' | 'element' | 'aisle'; base: ProjectDoc; moved: boolean; screen0: Vec2 }
+    | { type: 'move'; start: Vec2; ids: Set<string>; kind: ItemKind; base: ProjectDoc; moved: boolean; screen0: Vec2 }
+    | { type: 'rotate'; center: Vec2; a0: number; ids: Set<string>; base: ProjectDoc; baseAngle: number; moved: boolean }
     | { type: 'vertex'; idx: number; moved: boolean; screen0: Vec2 }
     | null
   >(null);
+  const longPress = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [rotLabel, setRotLabel] = useState<{ x: number; y: number; text: string } | null>(null);
+  const clearLong = (): void => {
+    if (longPress.current) clearTimeout(longPress.current);
+    longPress.current = null;
+  };
 
   const local = (e: React.PointerEvent | PointerEvent): Vec2 => {
     const r = wrap.current!.getBoundingClientRect();
     return { x: e.clientX - r.left, y: e.clientY - r.top };
   };
 
+  // 選択中の枠の回転中心とハンドル位置（ワールド座標）
+  const selStalls = st.selKind === 'stall' ? doc.stalls.filter((x) => st.selIds.includes(x.id)) : [];
+  const rotHandle = useMemo(() => {
+    if (!selStalls.length || st.locked) return null;
+    const c = { x: selStalls.reduce((a, x) => a + x.cx, 0) / selStalls.length, y: selStalls.reduce((a, x) => a + x.cy, 0) / selStalls.length };
+    const gap = 34 / view.s;
+    if (selStalls.length === 1) {
+      const x = selStalls[0];
+      const th = (x.angle * Math.PI) / 180;
+      const front = { x: Math.sin(th), y: -Math.cos(th) }; // 奥行き方向の逆＝入庫側
+      const r = x.depth / 2 + gap;
+      return { c, h: { x: c.x + front.x * r, y: c.y + front.y * r } };
+    }
+    const R = Math.max(...selStalls.map((x) => Math.hypot(x.cx - c.x, x.cy - c.y) + Math.hypot(x.width, x.depth) / 2));
+    // 画面の上方向（表示回転を考慮）にハンドルを置く：表示空間の (0,-1) を逆回転し、y を反転してワールドへ
+    const phi = (-view.rot * Math.PI) / 180;
+    return { c, h: { x: c.x + Math.sin(phi) * (R + gap), y: c.y + Math.cos(phi) * (R + gap) } };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selStalls.map((x) => `${x.id}:${x.cx}:${x.cy}:${x.angle}`).join('|'), view.s, view.rot, st.locked]);
+
+  const startPinch = (): void => {
+    const g = gesture.current;
+    if (g && (g.type === 'move' || g.type === 'rotate' || g.type === 'vertex') && (('moved' in g && g.moved) || g.type === 'vertex')) st.cancelLive();
+    setRotLabel(null);
+    clearLong();
+    const [a, b] = [...pointers.current.values()];
+    gesture.current = { type: 'pinch', d0: Math.hypot(a.x - b.x, a.y - b.y), mid0: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, view };
+  };
+
   const onPointerDown = (e: React.PointerEvent): void => {
-    (e.target as Element).setPointerCapture?.(e.pointerId);
+    if (e.button !== 0 && e.pointerType === 'mouse') return;
+    try {
+      wrap.current?.setPointerCapture(e.pointerId);
+    } catch {
+      /* noop */
+    }
     const p = local(e);
-    pointers.current.set(e.pointerId, p);
-    if (pointers.current.size === 2) {
-      if (gesture.current?.type === 'move' || gesture.current?.type === 'vertex') st.endLive();
-      const [a, b] = [...pointers.current.values()];
-      gesture.current = { type: 'pinch', d0: Math.hypot(a.x - b.x, a.y - b.y), mid0: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, view };
+    pointers.current.set(e.pointerId, { ...p, type: e.pointerType });
+    window.dispatchEvent(new CustomEvent('ldc:canvas-touch'));
+    if (pointers.current.size >= 2) {
+      startPinch();
       return;
     }
+    const touch = e.pointerType !== 'mouse';
     const target = (e.target as Element).closest('[data-hit]') as HTMLElement | null;
     const hit = target?.getAttribute('data-hit');
     const id = target?.getAttribute('data-id') ?? '';
     const w = toWorld(p.x, p.y);
 
+    if (hit === 'rotate' && rotHandle) {
+      const ids = new Set(useProject.getState().selIds);
+      st.beginLive('回転');
+      gesture.current = { type: 'rotate', center: rotHandle.c, a0: Math.atan2(w.y - rotHandle.c.y, w.x - rotHandle.c.x), ids, base: doc, baseAngle: selStalls[0]?.angle ?? 0, moved: false };
+      return;
+    }
     if (st.tool === 'vertex' && site) {
       if (hit === 'vertex' && !st.locked) {
         st.beginLive('頂点の移動');
@@ -212,56 +272,60 @@ export function DrawingCanvas({ problems }: { problems: Set<string> }): JSX.Elem
         return;
       }
     }
-    if ((st.tool === 'addStall' || st.tool === 'addObstacle' || st.tool === 'addElement') && !st.locked && e.button === 0) {
-      const sx = snapValue(w.x, st.snap);
-      const sy = snapValue(w.y, st.snap);
-      const ang = ((view.rot % 360) + 360) % 360;
-      if (st.tool === 'addStall') {
-        const t = doc.stallTypes.find((x) => x.id === st.addKind) ?? doc.stallTypes[0];
-        const sid = newId('s');
-        st.commit('駐車枠の追加', (d) => ({ ...d, stalls: [...d.stalls, { id: sid, typeId: t.id, cx: sx, cy: sy, width: t.width, depth: t.depth, angle: ang }] }));
-        st.select('stall', [sid]);
-      } else if (st.tool === 'addObstacle') {
-        const k = st.addKind as ObstacleKind;
-        const dim = OBSTACLE_DEFAULT[k] ?? { w: 3, h: 3 };
-        const oid = newId('o');
-        st.commit('障害物の追加', (d) => ({ ...d, obstacles: [...d.obstacles, { id: oid, kind: k, cx: sx, cy: sy, w: dim.w, h: dim.h, angle: ang }] }));
-        st.select('obstacle', [oid]);
-      } else {
-        const k = st.addKind as SiteElementKind;
-        const dim = ELEMENT_DEFAULT[k] ?? { w: 2, h: 2 };
-        const eid = newId('x');
-        st.commit('設備の追加', (d) => ({ ...d, elements: [...d.elements, { id: eid, kind: k, cx: sx, cy: sy, w: dim.w, h: dim.h, angle: ang }] }));
-        st.select('element', [eid]);
-      }
+    if (st.tool === 'addStall' || st.tool === 'addObstacle' || st.tool === 'addElement') {
+      gesture.current = { type: 'pan', start: p, view, moved: false, tap: st.locked ? undefined : 'add' };
       return;
     }
     if (st.tool !== 'pan' && hit && ['stall', 'obstacle', 'element', 'aisle'].includes(hit) && id) {
-      const kind = hit as 'stall' | 'obstacle' | 'element' | 'aisle';
+      const kind = hit as ItemKind;
       const already = st.selKind === kind && st.selIds.includes(id);
-      if (!already || st.multiSelect || e.shiftKey) st.select(kind, [id], e.shiftKey);
+      if (touch && !already) {
+        // 未選択の枠：タップで選択、ドラッグなら図面移動、長押しで複数選択
+        gesture.current = { type: 'pan', start: p, view, moved: false, tap: { kind, id } };
+        longPress.current = setTimeout(() => {
+          const g = gesture.current;
+          if (g?.type === 'pan' && !g.moved && g.tap && typeof g.tap === 'object') {
+            useProject.getState().select(g.tap.kind, [g.tap.id], true);
+            g.tap = undefined;
+          }
+        }, 550);
+        return;
+      }
+      if (!touch && (!already || st.multiSelect || e.shiftKey)) st.select(kind, [id], e.shiftKey);
+      else if (touch && already && st.multiSelect) {
+        // 複数選択モード中は選択済みのタップで解除（移動しなければ）
+      }
       const ids = new Set(useProject.getState().selIds);
-      if (!st.locked && ids.size) {
-        gesture.current = { type: 'move', start: w, ids, kind, base: doc, moved: false, screen0: p };
+      if (!st.locked && ids.size) gesture.current = { type: 'move', start: w, ids, kind, base: doc, moved: false, screen0: p };
+      if (touch && already) {
+        longPress.current = setTimeout(() => {
+          const g = gesture.current;
+          if (g?.type === 'move' && !g.moved) {
+            useProject.getState().select(kind, [id], true);
+            gesture.current = null;
+          }
+        }, 550);
       }
       return;
     }
-    gesture.current = { type: 'pan', start: p, view, moved: false };
+    gesture.current = { type: 'pan', start: p, view, moved: false, tap: 'empty' };
   };
 
   const onPointerMove = (e: React.PointerEvent): void => {
-    if (!pointers.current.has(e.pointerId)) return;
+    const prev = pointers.current.get(e.pointerId);
+    if (!prev) return;
     const p = local(e);
-    pointers.current.set(e.pointerId, p);
+    pointers.current.set(e.pointerId, { ...p, type: prev.type });
     const g = gesture.current;
     if (!g) return;
-    if (g.type === 'pinch' && pointers.current.size >= 2) {
+    if (g.type === 'pinch') {
+      if (pointers.current.size < 2) return;
       const [a, b] = [...pointers.current.values()];
       const d = Math.hypot(a.x - b.x, a.y - b.y);
       const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
       userMoved.current = true;
       const s = Math.min(400, Math.max(0.3, g.view.s * (d / Math.max(1, g.d0))));
-      // ピンチ中心を固定してズーム＋パン
+      // ピンチ中心を固定してズーム＋2本指移動
       const r = (-g.view.rot * Math.PI) / 180;
       const anchorDx = (g.mid0.x - size.w / 2) / g.view.s;
       const anchorDy = (g.mid0.y - size.h / 2) / g.view.s;
@@ -275,18 +339,36 @@ export function DrawingCanvas({ problems }: { problems: Set<string> }): JSX.Elem
     if (g.type === 'pan') {
       const dx = p.x - g.start.x;
       const dy = p.y - g.start.y;
-      if (Math.hypot(dx, dy) > 4) {
+      if (!g.moved && Math.hypot(dx, dy) <= 8) return;
+      if (!g.moved) {
         g.moved = true;
-        userMoved.current = true;
+        clearLong();
       }
+      userMoved.current = true;
       const r = (-g.view.rot * Math.PI) / 180;
       setView({ ...g.view, cx: g.view.cx - (dx * Math.cos(r) - dy * Math.sin(r)) / g.view.s, cy: g.view.cy - (dx * Math.sin(r) + dy * Math.cos(r)) / g.view.s });
       return;
     }
+    if (g.type === 'rotate') {
+      const w = toWorld(p.x, p.y);
+      const a = Math.atan2(w.y - g.center.y, w.x - g.center.x);
+      let delta = ((a - g.a0) * 180) / Math.PI;
+      // 結果の角度を1°刻みに、15°の倍数付近(±3°)は吸着
+      let target = Math.round(g.baseAngle + delta);
+      const m15 = Math.round(target / 15) * 15;
+      if (Math.abs(target - m15) <= 3) target = m15;
+      delta = target - g.baseAngle;
+      g.moved = true;
+      st.live((d) => ({ ...d, stalls: rotateStalls(g.base.stalls, g.ids, delta) }));
+      const norm = ((target % 360) + 540) % 360 - 180;
+      setRotLabel({ x: p.x, y: p.y - 48, text: g.ids.size === 1 ? `${norm}°` : `${delta > 0 ? '+' : ''}${Math.round(delta)}°` });
+      return;
+    }
     if (g.type === 'move') {
-      if (!g.moved && Math.hypot(p.x - g.screen0.x, p.y - g.screen0.y) < 6) return; // 誤操作防止
+      if (!g.moved && Math.hypot(p.x - g.screen0.x, p.y - g.screen0.y) < 8) return; // 誤操作防止
       if (!g.moved) {
         g.moved = true;
+        clearLong();
         st.beginLive('移動');
       }
       const w = toWorld(p.x, p.y);
@@ -303,7 +385,7 @@ export function DrawingCanvas({ problems }: { problems: Set<string> }): JSX.Elem
       return;
     }
     if (g.type === 'vertex' && site) {
-      if (!g.moved && Math.hypot(p.x - g.screen0.x, p.y - g.screen0.y) < 6) return;
+      if (!g.moved && Math.hypot(p.x - g.screen0.x, p.y - g.screen0.y) < 8) return;
       g.moved = true;
       const w = toWorld(p.x, p.y);
       const np = { x: snapValue(w.x, st.snap), y: snapValue(w.y, st.snap) };
@@ -321,19 +403,64 @@ export function DrawingCanvas({ problems }: { problems: Set<string> }): JSX.Elem
     }
   };
 
+  const placeAt = (p: Vec2): void => {
+    const w = toWorld(p.x, p.y);
+    const sx = snapValue(w.x, st.snap);
+    const sy = snapValue(w.y, st.snap);
+    const ang = ((view.rot % 360) + 360) % 360;
+    if (st.tool === 'addStall') {
+      const t = doc.stallTypes.find((x) => x.id === st.addKind) ?? doc.stallTypes[0];
+      const sid = newId('s');
+      st.commit('駐車枠の追加', (d) => ({ ...d, stalls: [...d.stalls, { id: sid, typeId: t.id, cx: sx, cy: sy, width: t.width, depth: t.depth, angle: ang }] }));
+      st.select('stall', [sid]);
+    } else if (st.tool === 'addObstacle') {
+      const k = st.addKind as ObstacleKind;
+      const dim = OBSTACLE_DEFAULT[k] ?? { w: 3, h: 3 };
+      const oid = newId('o');
+      st.commit('障害物の追加', (d) => ({ ...d, obstacles: [...d.obstacles, { id: oid, kind: k, cx: sx, cy: sy, w: dim.w, h: dim.h, angle: ang }] }));
+      st.select('obstacle', [oid]);
+    } else if (st.tool === 'addElement') {
+      const k = st.addKind as SiteElementKind;
+      const dim = ELEMENT_DEFAULT[k] ?? { w: 2, h: 2 };
+      const eid = newId('x');
+      st.commit('設備の追加', (d) => ({ ...d, elements: [...d.elements, { id: eid, kind: k, cx: sx, cy: sy, w: dim.w, h: dim.h, angle: ang }] }));
+      st.select('element', [eid]);
+    }
+  };
+
   const onPointerUp = (e: React.PointerEvent): void => {
+    const info = pointers.current.get(e.pointerId);
     pointers.current.delete(e.pointerId);
+    clearLong();
     const g = gesture.current;
     if (g?.type === 'pinch') {
       if (pointers.current.size === 1) {
+        // 残った1本指は図面移動として継続（枠は動かさない）
         const [q] = [...pointers.current.values()];
         gesture.current = { type: 'pan', start: q, view, moved: true };
-      } else gesture.current = null;
+      } else if (pointers.current.size === 0) gesture.current = null;
       return;
     }
     if (pointers.current.size > 0) return;
-    if (g?.type === 'pan' && !g.moved && st.tool !== 'pan') st.clearSelection();
-    if (g?.type === 'move' && g.moved) st.endLive();
+    if (e.type === 'pointercancel') {
+      if (g && (g.type === 'move' || g.type === 'rotate' || g.type === 'vertex')) st.cancelLive();
+      gesture.current = null;
+      setRotLabel(null);
+      return;
+    }
+    if (g?.type === 'pan' && !g.moved) {
+      if (g.tap === 'add') placeAt(local(e));
+      else if (g.tap === 'empty' && info?.type === 'mouse' && st.tool !== 'pan') st.clearSelection();
+      else if (g.tap && typeof g.tap === 'object') st.select(g.tap.kind, [g.tap.id], st.multiSelect);
+    }
+    if (g?.type === 'move') {
+      if (g.moved) st.endLive();
+    }
+    if (g?.type === 'rotate') {
+      if (g.moved) st.endLive();
+      else st.cancelLive();
+      setRotLabel(null);
+    }
     if (g?.type === 'vertex') {
       if (g.moved) {
         st.live((d) => ({ ...d, solution: solveLand(d.land) }));
@@ -342,6 +469,27 @@ export function DrawingCanvas({ problems }: { problems: Set<string> }): JSX.Elem
     }
     gesture.current = null;
   };
+
+  // iOS Safari：ページ自体のピンチズーム・スクロール・バウンスを図面上で抑止（タッチ操作とスクロールの干渉防止）
+  useEffect(() => {
+    const el = wrap.current;
+    if (!el) return;
+    const stop = (ev: Event): void => {
+      if (ev.cancelable) ev.preventDefault();
+    };
+    el.addEventListener('touchstart', stop, { passive: false });
+    el.addEventListener('touchmove', stop, { passive: false });
+    el.addEventListener('gesturestart', stop as EventListener, { passive: false } as AddEventListenerOptions);
+    el.addEventListener('gesturechange', stop as EventListener, { passive: false } as AddEventListenerOptions);
+    el.addEventListener('contextmenu', stop);
+    return () => {
+      el.removeEventListener('touchstart', stop);
+      el.removeEventListener('touchmove', stop);
+      el.removeEventListener('gesturestart', stop as EventListener);
+      el.removeEventListener('gesturechange', stop as EventListener);
+      el.removeEventListener('contextmenu', stop);
+    };
+  }, []);
 
   const onWheel = (e: React.WheelEvent): void => {
     const p = local(e as unknown as PointerEvent);
@@ -387,11 +535,12 @@ export function DrawingCanvas({ problems }: { problems: Set<string> }): JSX.Elem
   return (
     <div
       ref={wrap}
-      className="relative h-full w-full touch-none overflow-hidden bg-[#fbfcfc]"
+      className="relative h-full w-full touch-none select-none overflow-hidden bg-[#fbfcfc] [-webkit-touch-callout:none] [-webkit-user-select:none]"
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
+      onLostPointerCapture={(e) => pointers.current.has(e.pointerId) && onPointerUp(e)}
       onWheel={onWheel}
       data-testid="canvas"
       style={{ cursor: st.tool === 'pan' ? 'grab' : st.tool.startsWith('add') ? 'crosshair' : 'default' }}
@@ -435,8 +584,23 @@ export function DrawingCanvas({ problems }: { problems: Set<string> }): JSX.Elem
                 style={{ cursor: 'move' }}
               />
             ))}
+          {rotHandle && (
+            <g data-testid="rotate-handle-group">
+              <line x1={rotHandle.c.x} y1={-rotHandle.c.y} x2={rotHandle.h.x} y2={-rotHandle.h.y} stroke="#e4002b" strokeWidth={1.5 / view.s} strokeDasharray={`${4 / view.s} ${3 / view.s}`} pointerEvents="none" />
+              <circle cx={rotHandle.c.x} cy={-rotHandle.c.y} r={3 / view.s} fill="#e4002b" pointerEvents="none" />
+              {/* 指で掴みやすいよう当たり判定は 22px */}
+              <circle cx={rotHandle.h.x} cy={-rotHandle.h.y} r={22 / view.s} fill="#ffffff" fillOpacity={0.01} data-hit="rotate" data-id="rotate" data-testid="rotate-handle" pointerEvents="all" />
+              <circle cx={rotHandle.h.x} cy={-rotHandle.h.y} r={12 / view.s} fill="#ffffff" stroke="#e4002b" strokeWidth={2 / view.s} pointerEvents="none" />
+              <path d={`M ${rotHandle.h.x - 5 / view.s} ${-rotHandle.h.y + 2 / view.s} a ${5 / view.s} ${5 / view.s} 0 1 1 ${5 / view.s} ${4 / view.s}`} fill="none" stroke="#e4002b" strokeWidth={1.8 / view.s} pointerEvents="none" />
+            </g>
+          )}
         </g>
       </svg>
+      {rotLabel && (
+        <div className="pointer-events-none absolute -translate-x-1/2 rounded bg-ink px-2 py-1 font-mono text-[15px] font-bold text-white" style={{ left: rotLabel.x, top: rotLabel.y }} data-testid="rotate-label">
+          {rotLabel.text}
+        </div>
+      )}
 
       {/* 方位マーク */}
       <div className="pointer-events-none absolute right-3 top-3 flex h-14 w-14 items-center justify-center rounded-full border border-neutral-300 bg-white/90" style={{ transform: `rotate(${doc.northAngle + view.rot}deg)` }} aria-label="方位">
@@ -448,14 +612,14 @@ export function DrawingCanvas({ problems }: { problems: Set<string> }): JSX.Elem
         </svg>
       </div>
       {/* 縮尺バー */}
-      <div className="pointer-events-none absolute bottom-3 left-3 rounded bg-white/90 px-2 py-1 text-[12px] text-ink shadow-sm">
+      <div className="pointer-events-none absolute left-3 top-3 rounded bg-white/90 px-2 py-1 text-[12px] text-ink shadow-sm" data-testid="scale-bar" data-px-per-m={view.s.toFixed(4)}>
         <div className="flex items-end gap-2">
           <div style={{ width: niceM * view.s }} className="h-2 border-x-2 border-b-2 border-ink" />
           <span className="font-mono">{niceM}m</span>
         </div>
       </div>
       {!site && (
-        <div className="pointer-events-none absolute inset-x-4 top-4 mx-auto max-w-md rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-[13px] text-amber-900">
+        <div className="pointer-events-none absolute inset-x-4 top-16 mx-auto max-w-md rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-[13px] text-amber-900">
           土地形状がまだ確定していません。寸法を入力してください（形状が一意に定まるまで図面は生成されません）。
         </div>
       )}

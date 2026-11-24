@@ -47,6 +47,8 @@ interface State {
   beginLive(label: string): void;
   live(fn: (d: ProjectDoc) => ProjectDoc): void;
   endLive(): void;
+  /** ドラッグ中の変更を取り消して開始前に戻す（2本目の指が触れた時など） */
+  cancelLive(): void;
   setLand(land: LandInput, label?: string): void;
   undo(): void;
   redo(): void;
@@ -64,6 +66,15 @@ interface State {
 }
 
 let abort: AbortController | null = null;
+
+/** Undo/Redo 後も、まだ存在するオブジェクトの選択は維持する */
+function keepSelection(s: { selKind: SelKind; selIds: string[] }, d: ProjectDoc): { selKind: SelKind; selIds: string[] } {
+  const pool: Record<string, { id: string }[]> = { stall: d.stalls, obstacle: d.obstacles, element: d.elements, aisle: d.aisles };
+  const list = s.selKind ? pool[s.selKind] : undefined;
+  if (!list) return { selKind: null, selIds: [] };
+  const ids = s.selIds.filter((id) => list.some((o) => o.id === id));
+  return { selKind: ids.length ? s.selKind : null, selIds: ids };
+}
 let liveBase: { label: string; doc: ProjectDoc } | null = null;
 
 const stamp = (d: ProjectDoc, label: string): ProjectDoc => ({
@@ -124,6 +135,12 @@ export const useProject = create<State>((set, get) => ({
     set((s) => ({ doc: stamp(cur, base.label), past: [...s.past, base.doc].slice(-HISTORY_LIMIT), future: [], saveState: 'dirty' }));
   },
 
+  cancelLive: () => {
+    const base = liveBase;
+    liveBase = null;
+    if (base) set({ doc: base.doc });
+  },
+
   setLand: (land, label = '土地寸法の変更') => {
     get().commit(label, (d) => {
       const solution = solveLand(land);
@@ -136,13 +153,13 @@ export const useProject = create<State>((set, get) => ({
     const { past, doc, future } = get();
     if (!past.length || !doc) return;
     const prev = past[past.length - 1];
-    set({ doc: prev, past: past.slice(0, -1), future: [doc, ...future], saveState: 'dirty', selIds: [], selKind: null });
+    set({ doc: prev, past: past.slice(0, -1), future: [doc, ...future], saveState: 'dirty', ...keepSelection(get(), prev) });
   },
   redo: () => {
     const { past, doc, future } = get();
     if (!future.length || !doc) return;
     const next = future[0];
-    set({ doc: next, past: [...past, doc], future: future.slice(1), saveState: 'dirty', selIds: [], selKind: null });
+    set({ doc: next, past: [...past, doc], future: future.slice(1), saveState: 'dirty', ...keepSelection(get(), next) });
   },
 
   select: (kind, ids, additive) => {

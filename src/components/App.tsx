@@ -6,6 +6,7 @@ import { useProject } from '@/stores/projectStore';
 import { Home } from '@/components/Home';
 import { Editor, type PanelTab } from '@/components/Editor';
 import { Settings } from '@/components/Settings';
+import { NumericKeypad } from '@/components/keypad/NumericKeypad';
 import { pickStorage } from '@/services/storage/select';
 import { createProject } from '@/services/projectFactory';
 
@@ -179,6 +180,7 @@ export function App(): JSX.Element {
       ) : (
         <Home onOpen={openProject} onNew={newProject} onSettings={() => go('settings')} />
       )}
+      <NumericKeypad />
     </>
   );
 }

@@ -3,6 +3,8 @@
 @tailwind utilities;
 
 :root { color-scheme: light; }
+/* ダブルタップ拡大・ページのピンチ拡大を抑止（図面は独自にピンチ処理する） */
+html { touch-action: manipulation; -webkit-text-size-adjust: 100%; }
 html, body { height: 100%; }
 body {
   margin: 0;
@@ -16,3 +18,7 @@ body {
 input, select, textarea, button { font: inherit; }
 .font-mono { font-family: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace; }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; scroll-behavior: auto !important; } }
+
+/* スクロール領域内のスクロールが背後（図面・ページ）へ伝わらないように */
+.overscroll-contain { overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+button { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }

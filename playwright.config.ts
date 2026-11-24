@@ -16,7 +16,16 @@ export default defineConfig({
   use: { baseURL: `http://127.0.0.1:${PORT}${BASE}`, trace: 'off', screenshot: 'only-on-failure' },
   webServer: { command: `python3 -m http.server ${PORT} --directory ${DIR} --bind 127.0.0.1`, url: `http://127.0.0.1:${PORT}`, reuseExistingServer: true, timeout: 30_000 },
   projects: [
-    { name: 'desktop', use: { ...devices['Desktop Chrome'], channel: 'chrome', viewport: { width: 1440, height: 900 } }, testIgnore: /(mobile|shots)\.spec\.ts/ },
-    { name: 'iphone', use: { ...devices['iPhone 14'], browserName: 'chromium', channel: 'chrome' }, testMatch: /mobile\.spec\.ts/ },
+    { name: 'desktop', use: { ...devices['Desktop Chrome'], channel: 'chrome', viewport: { width: 1440, height: 900 } }, testIgnore: /(mobile|touch|shots)\.spec\.ts/ },
+    // 実機相当の画面サイズ・タッチ（Chrome でエミュレーション）
+    ...(
+      [
+        ['iphone-se', 'iPhone SE'],
+        ['iphone', 'iPhone 14'],
+        ['iphone-pro-max', 'iPhone 15 Pro Max'],
+        ['iphone-landscape', 'iPhone 14 landscape'],
+        ['ipad-mini', 'iPad Mini'],
+      ] as const
+    ).map(([name, dev]) => ({ name, use: { ...devices[dev], browserName: 'chromium' as const, channel: 'chrome' }, testMatch: /(mobile|touch)\.spec\.ts/ })),
   ],
 });

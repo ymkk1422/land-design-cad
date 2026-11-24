@@ -1,6 +1,6 @@
 'use client';
 import type { JSX } from 'react';
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import type { Aisle, Obstacle, SiteElement, Stall } from '@/types';
 import { useProject } from '@/stores/projectStore';
 import { Btn, LengthInput, NumInput, Section, Select } from '@/components/ui';
@@ -9,7 +9,7 @@ import { alignStalls, deleteStalls, distributeStalls, duplicateStalls, moveStall
 import { currentSite, OBSTACLE_STYLE } from '@/engine/export/drawingModel';
 import { vertexName } from '@/engine/geometry/polygon';
 import { moveVertexLand } from '@/engine/constraints/vertexEdit';
-import { deleteSelectedVertex } from '@/components/canvas/DrawingCanvas';
+import { deleteSelection } from '@/components/selectionActions';
 
 export function SelectionPanel(): JSX.Element {
   const doc = useProject((s) => s.doc)!;
@@ -20,23 +20,7 @@ export function SelectionPanel(): JSX.Element {
   const [dy, setDy] = useState<number | null>(0);
   const [gap, setGap] = useState<number | null>(0);
 
-  const del = (): void => {
-    if (locked || !selIds.length) return;
-    if (selKind === 'stall') commit('駐車枠の削除', (d) => ({ ...d, stalls: deleteStalls(d.stalls, ids) }));
-    else if (selKind === 'obstacle') commit('障害物の削除', (d) => ({ ...d, obstacles: d.obstacles.filter((o) => !ids.has(o.id)) }));
-    else if (selKind === 'element') commit('設備の削除', (d) => ({ ...d, elements: d.elements.filter((o) => !ids.has(o.id)) }));
-    else if (selKind === 'aisle') commit('通路の削除', (d) => ({ ...d, aisles: d.aisles.filter((o) => !ids.has(o.id)) }));
-    else if (selKind === 'vertex') {
-      const patch = deleteSelectedVertex(doc, Number(selIds[0]));
-      if (patch) commit('頂点の削除', (d) => ({ ...d, ...patch }));
-    }
-    clearSelection();
-  };
-  useEffect(() => {
-    const h = (): void => del();
-    window.addEventListener('ldc:delete-selection', h);
-    return () => window.removeEventListener('ldc:delete-selection', h);
-  });
+  const del = (): void => deleteSelection();
 
   if (!selKind || !selIds.length) {
     return (

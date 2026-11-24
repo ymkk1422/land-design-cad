@@ -26,6 +26,6 @@ export default defineConfig({
         ['iphone-landscape', 'iPhone 14 landscape'],
         ['ipad-mini', 'iPad Mini'],
       ] as const
-    ).map(([name, dev]) => ({ name, use: { ...devices[dev], browserName: 'chromium' as const, channel: 'chrome' }, testMatch: /(mobile|touch)\.spec\.ts/ })),
+    ).map(([name, dev]) => ({ name, use: { ...devices[dev], browserName: 'chromium' as const, channel: 'chrome' }, testMatch: /(mobile|touch|underlay)\.spec\.ts/ })),
   ],
 });

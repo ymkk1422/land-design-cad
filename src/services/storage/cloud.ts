@@ -4,6 +4,7 @@
 import type { ProjectDoc, ProjectSummary } from '@/types';
 import { migrateProject } from '@/services/projectFactory';
 import { MAX_VERSIONS, summarize, type StorageAdapter, type VersionInfo } from './index';
+import { base64ToBlob, blobToBase64, MAX_ASSET_BYTES } from './assets';
 
 // ---- Claude Artifact ランタイムの最小型 ----
 interface DbSnap {
@@ -88,6 +89,12 @@ export class ClaudeDbAdapter implements StorageAdapter {
     }
   }
   async remove(id: string): Promise<void> {
+    try {
+      const d = await this.load(id);
+      for (const a of d.assetIds ?? []) await this.deleteAsset(a).catch(() => undefined);
+    } catch {
+      /* 図面が読めなくても削除は続行 */
+    }
     for (const v of await this.listVersions(id)) await this.col().doc(`v_${safeKey(id)}_${v.versionId}`).delete();
     await this.col().doc(`p_${safeKey(id)}`).delete();
     await this.col().doc(`s_${safeKey(id)}`).delete();
@@ -99,6 +106,35 @@ export class ClaudeDbAdapter implements StorageAdapter {
       .map(({ versionId, savedAt, label }) => ({ versionId, savedAt, label }))
       .sort((a, b) => b.savedAt.localeCompare(a.savedAt));
   }
+  // アセット：1文書 256KB 制限のため base64 を 180KB ごとに分割して保存
+  async saveAsset(id: string, blob: Blob): Promise<void> {
+    if (blob.size > MAX_ASSET_BYTES) throw new Error('ファイルが大きすぎます');
+    const b64 = await blobToBase64(blob);
+    const CH = 180 * 1024;
+    const n = Math.ceil(b64.length / CH);
+    for (let k = 0; k < n; k++) await this.col().doc(`ac_${safeKey(id)}_${k}`).set({ kind: 'assetChunk', data: b64.slice(k * CH, (k + 1) * CH) });
+    await this.col().doc(`am_${safeKey(id)}`).set({ kind: 'asset', mime: blob.type, size: blob.size, chunks: n, length: b64.length });
+  }
+  async loadAsset(id: string): Promise<Blob> {
+    const m = await this.col().doc(`am_${safeKey(id)}`).get();
+    if (!m.exists) throw new Error('下絵の画像が見つかりません');
+    const meta = m.data() as { mime: string; chunks: number; length: number };
+    const parts: string[] = [];
+    for (let k = 0; k < meta.chunks; k++) {
+      const c = await this.col().doc(`ac_${safeKey(id)}_${k}`).get();
+      parts.push(String(c.data()?.data ?? ''));
+    }
+    const b64 = parts.join('');
+    if (b64.length !== meta.length) throw new Error('下絵の画像データが破損しています');
+    return base64ToBlob(b64, meta.mime);
+  }
+  async deleteAsset(id: string): Promise<void> {
+    const m = await this.col().doc(`am_${safeKey(id)}`).get();
+    const n = m.exists ? Number((m.data() as { chunks: number }).chunks) : 0;
+    for (let k = 0; k < n; k++) await this.col().doc(`ac_${safeKey(id)}_${k}`).delete();
+    await this.col().doc(`am_${safeKey(id)}`).delete();
+  }
+
   async loadVersion(id: string, versionId: string): Promise<ProjectDoc> {
     const s = await this.col().doc(`v_${safeKey(id)}_${versionId}`).get();
     if (!s.exists) throw new Error('バージョンが見つかりません');
@@ -153,7 +189,32 @@ export class SupabaseAdapter implements StorageAdapter {
     });
     if (error) throw new Error(error.message);
   }
+  // アセットは Supabase Storage の underlays バケット（パス先頭がユーザーID、RLSで本人のみ）
+  private async assetPath(id: string): Promise<string> {
+    const { data } = await this.sb.auth.getUser();
+    if (!data.user) throw new Error('ログインが必要です');
+    return `${data.user.id}/${id.replace(/[^A-Za-z0-9_-]/g, '_')}`;
+  }
+  async saveAsset(id: string, blob: Blob): Promise<void> {
+    if (blob.size > MAX_ASSET_BYTES) throw new Error('ファイルが大きすぎます');
+    const { error } = await this.sb.storage.from('underlays').upload(await this.assetPath(id), blob, { contentType: blob.type, upsert: true });
+    if (error) throw new Error(error.message);
+  }
+  async loadAsset(id: string): Promise<Blob> {
+    const { data, error } = await this.sb.storage.from('underlays').download(await this.assetPath(id));
+    if (error || !data) throw new Error(error?.message ?? '下絵の画像が見つかりません');
+    return data;
+  }
+  async deleteAsset(id: string): Promise<void> {
+    await this.sb.storage.from('underlays').remove([await this.assetPath(id)]);
+  }
   async remove(id: string): Promise<void> {
+    try {
+      const d = await this.load(id);
+      for (const a of d.assetIds ?? []) await this.deleteAsset(a).catch(() => undefined);
+    } catch {
+      /* 続行 */
+    }
     const { error } = await this.sb.from('projects').delete().eq('id', id);
     if (error) throw new Error(error.message);
   }

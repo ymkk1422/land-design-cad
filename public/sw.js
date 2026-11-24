@@ -1,5 +1,5 @@
 // LAND DESIGN CAD Service Worker：アプリ本体をキャッシュしてオフライン起動に対応
-const CACHE = 'ldc-v1';
+const CACHE = 'ldc-v2';
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(['./', './manifest.webmanifest'])).then(() => self.skipWaiting()));
 });

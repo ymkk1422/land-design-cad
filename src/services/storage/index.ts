@@ -3,6 +3,7 @@ import type { ProjectDoc, ProjectSummary } from '@/types';
 import { migrateProject } from '@/services/projectFactory';
 import { polygonArea } from '@/engine/geometry/polygon';
 import { isDrawable } from '@/engine/constraints/solver';
+import { IdbAssetStore } from './assets';
 
 export interface VersionInfo {
   versionId: string;
@@ -19,6 +20,10 @@ export interface StorageAdapter {
   remove(id: string): Promise<void>;
   listVersions(id: string): Promise<VersionInfo[]>;
   loadVersion(id: string, versionId: string): Promise<ProjectDoc>;
+  /** 下絵などのアセット（図面データとは別に保存） */
+  saveAsset(id: string, blob: Blob): Promise<void>;
+  loadAsset(id: string): Promise<Blob>;
+  deleteAsset(id: string): Promise<void>;
 }
 
 export const MAX_VERSIONS = 15;
@@ -91,6 +96,16 @@ export class LocalAdapter implements StorageAdapter {
   readonly kind = 'local' as const;
   readonly label = 'この端末に保存';
   private mem = new Map<string, string>(); // localStorage 不可時のフォールバック
+  private assets = new IdbAssetStore();
+  saveAsset(id: string, blob: Blob): Promise<void> {
+    return this.assets.put(id, blob);
+  }
+  loadAsset(id: string): Promise<Blob> {
+    return this.assets.get(id);
+  }
+  deleteAsset(id: string): Promise<void> {
+    return this.assets.delete(id);
+  }
   private get s(): Storage | null {
     return typeof window === 'undefined' ? null : safeStorage();
   }
@@ -154,6 +169,19 @@ export class LocalAdapter implements StorageAdapter {
     }
   }
   async remove(id: string): Promise<void> {
+    // 図面が参照していたアセット（下絵の元画像など）も削除
+    const ids = new Set<string>();
+    const collect = (raw: string | null): void => {
+      try {
+        const d = JSON.parse(raw ?? 'null') as { assetIds?: string[] } | null;
+        d?.assetIds?.forEach((a) => ids.add(a));
+      } catch {
+        /* 破損データは無視 */
+      }
+    };
+    collect(this.get(kDoc(id)));
+    this.versions(id).forEach((v) => v.doc.assetIds?.forEach((a) => ids.add(a)));
+    for (const a of ids) await this.assets.delete(a).catch(() => undefined);
     this.del(kDoc(id));
     this.del(kVer(id));
     const idx = (await this.list()).filter((p) => p.id !== id);

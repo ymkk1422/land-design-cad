@@ -6,6 +6,8 @@ import { useProject } from '@/stores/projectStore';
 import { Btn, NumInput, Section, Select, Toggle } from '@/components/ui';
 import { buildExportSvg, STANDARD_SCALES, type PaperSize } from '@/engine/export/paper';
 import type { VersionInfo } from '@/services/storage';
+import { displayMatrix } from '@/engine/underlay/transform';
+import { assetDataUrl } from '@/services/underlayImport';
 
 export function OutputPanel(): JSX.Element {
   const doc = useProject((s) => s.doc)!;
@@ -17,11 +19,23 @@ export function OutputPanel(): JSX.Element {
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [versions, setVersions] = useState<VersionInfo[]>([]);
+  const [withUnderlay, setWithUnderlay] = useState(false);
+  const [ulHref, setUlHref] = useState<string | null>(null);
+  const ul = doc.underlay;
+  useEffect(() => {
+    if (!withUnderlay || !ul || !storage) return setUlHref(null);
+    let alive = true;
+    assetDataUrl(storage, ul.displayAssetId).then((h) => alive && setUlHref(h)).catch(() => alive && setUlHref(null));
+    return () => {
+      alive = false;
+    };
+  }, [withUnderlay, ul?.displayAssetId, storage]);
+  const underlayOpt = useMemo(() => (withUnderlay && ul && ulHref ? { href: ulHref, matrix: displayMatrix(ul), opacity: ul.opacity, w: ul.pxWidth, h: ul.pxHeight } : undefined), [withUnderlay, ul, ulHref]);
   const d = doc.display;
   const setD = (patch: Partial<DisplaySettings>): void => commit('表示設定', (x) => ({ ...x, display: { ...x.display, ...patch } }));
   const scale = scaleSel === 'custom' ? customScale ?? 100 : scaleSel;
 
-  const preview = useMemo(() => buildExportSvg(doc, { paper, scale, mode }), [doc, paper, scale, mode]);
+  const preview = useMemo(() => buildExportSvg(doc, { paper, scale, mode, underlay: underlayOpt }), [doc, paper, scale, mode, underlayOpt]);
 
   useEffect(() => {
     storage?.listVersions(doc.id).then(setVersions).catch(() => setVersions([]));
@@ -32,7 +46,7 @@ export function OutputPanel(): JSX.Element {
     setMsg(null);
     try {
       const ex = await import('@/services/exporter');
-      const opt = { paper, scale, mode, title: doc.name };
+      const opt = { paper, scale, mode, title: doc.name, underlay: underlayOpt };
       const r = fmt === 'pdf' ? await ex.exportPdf(doc, opt) : await ex.exportRaster(doc, opt, fmt);
       // 一部ブラウザで日本語ファイル名が無視されるため英数字名にする（図面名はPDF内・プロパティに記載）
       const ymd = new Date().toISOString().slice(0, 10).replace(/-/g, '');
@@ -76,7 +90,8 @@ export function OutputPanel(): JSX.Element {
             options={[{ value: 'auto', label: `自動（${preview.layout.scale === undefined ? '' : '1/' + preview.layout.scale}）` }, ...STANDARD_SCALES.filter((s) => s <= 500).map((s) => ({ value: s, label: `1/${s}` })), { value: 'custom', label: '任意縮尺' }]}
             testId="export-scale"
           />
-          {scaleSel === 'custom' && <NumInput label="1 /" value={customScale} digits={0} onChange={(v) => v && v > 0 && setCustomScale(v)} />}
+          {scaleSel === 'custom' && <NumInput label="1 /" value={customScale} digits={0} keypadMode="integer" onChange={(v) => v && v > 0 && setCustomScale(v)} />}
+          {ul && <Toggle label="下絵（取り込んだ測量図）を重ねて出力" checked={withUnderlay} onChange={setWithUnderlay} testId="export-underlay" />}
           <label className="block text-[13px] text-neutral-600">
             注記
             <textarea className="mt-1 w-full rounded border border-neutral-300 p-2 text-[16px]" rows={2} value={doc.notes} maxLength={200} onChange={(e) => commit('注記の変更', (x) => ({ ...x, notes: e.target.value }))} placeholder="PDFの注記欄に表示されます" />

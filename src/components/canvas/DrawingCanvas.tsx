@@ -10,6 +10,12 @@ import { moveStalls, newId, rotateStalls, snapValue } from '@/engine/parking-opt
 import { solveLand } from '@/engine/constraints/solver';
 import { deleteVertexLand, insertVertexLand, moveVertexLand, remapEdges } from '@/engine/constraints/vertexEdit';
 import { vertexName } from '@/engine/geometry/polygon';
+import type { PxPoint, UnderlayMeta } from '@/types';
+import { isUnderlayTool } from '@/stores/projectStore';
+import { UnderlayImage, UnderlayOverlay } from '@/components/underlay/UnderlayLayer';
+import { placeUnderlayPoint } from '@/components/underlay/actions';
+import { keepPivot, pxDist, pxToWorld, worldToPx } from '@/engine/underlay/transform';
+import { useUnderlayUi } from '@/stores/underlayUi';
 
 interface View {
   cx: number;
@@ -112,12 +118,32 @@ export function DrawingCanvas({ problems }: { problems: Set<string> }): JSX.Elem
   }, []);
 
   const fit = useCallback(() => {
-    const e = modelExtent(doc, site);
-    const w = e.maxX - e.minX + 8;
-    const h = e.maxY - e.minY + 8;
-    const s = Math.max(0.5, Math.min(size.w / w, size.h / h));
-    setView({ cx: (e.minX + e.maxX) / 2, cy: (e.minY + e.maxY) / 2, s, rot: 0 });
-  }, [doc, site, size]);
+    const e = { ...modelExtent(doc, site) };
+    // 下絵を表示中は画像全体も収める
+    const u = doc.underlay;
+    if (u && u.visible) {
+      const cs = [{ u: 0, v: 0 }, { u: u.pxWidth, v: 0 }, { u: u.pxWidth, v: u.pxHeight }, { u: 0, v: u.pxHeight }].map((q) => pxToWorld(u, q));
+      const hasModel = !!site || doc.stalls.length > 0;
+      if (!hasModel) Object.assign(e, { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
+      for (const c of cs) {
+        e.minX = Math.min(e.minX, c.x);
+        e.maxX = Math.max(e.maxX, c.x);
+        e.minY = Math.min(e.minY, -c.y);
+        e.maxY = Math.max(e.maxY, -c.y);
+      }
+    }
+    // 画面上の余白（上：案内バナー、下：浮動ボタン）を確保して収める
+    const w = e.maxX - e.minX + 2;
+    const h = e.maxY - e.minY + 2;
+    // 小さい画面（パネル表示中のiPhone SEなど）では余白を縮める
+    // 案内バナー（高さ48px・上端8px）表示中はその下から、通常は方位マーク・縮尺バーの下から
+    const bannerShown = st.tool.startsWith('ul') || st.tool.startsWith('add');
+    const padTop = bannerShown ? Math.min(64, size.h * 0.22) : Math.min(112, size.h * 0.16);
+    const padBottom = Math.min(76, size.h * 0.12);
+    const s = Math.max(0.3, Math.min((size.w - 32) / w, Math.max(40, size.h - padTop - padBottom) / h));
+    const cyShift = ((padTop - padBottom) / 2) / s;
+    setView({ cx: (e.minX + e.maxX) / 2, cy: (e.minY + e.maxY) / 2 - cyShift, s, rot: 0 });
+  }, [doc, site, size, st.tool]);
 
   // 初回・画面サイズ変更時（ユーザーが視点を動かすまで）は全体表示に合わせる
   const userMoved = useRef(false);
@@ -155,7 +181,8 @@ export function DrawingCanvas({ problems }: { problems: Set<string> }): JSX.Elem
 
   const textUnit = 1 / view.s;
   const highlight = useMemo(() => new Set(st.selIds), [st.selIds]);
-  const prims = useMemo(() => buildModel(doc, { mode: doc.mode, textUnit, sitePoints: site, highlight, problems }), [doc, textUnit, site, highlight, problems]);
+  const seeThrough = !!(doc.underlay && doc.underlay.visible);
+  const prims = useMemo(() => buildModel(doc, { mode: doc.mode, textUnit, sitePoints: site, highlight, problems, seeThrough }), [doc, textUnit, site, highlight, problems, seeThrough]);
 
   // 画面 ↔ 表示空間
   const toDisp = useCallback(
@@ -187,8 +214,13 @@ export function DrawingCanvas({ problems }: { problems: Set<string> }): JSX.Elem
     | { type: 'move'; start: Vec2; ids: Set<string>; kind: ItemKind; base: ProjectDoc; moved: boolean; screen0: Vec2 }
     | { type: 'rotate'; center: Vec2; a0: number; ids: Set<string>; base: ProjectDoc; baseAngle: number; moved: boolean }
     | { type: 'vertex'; idx: number; moved: boolean; screen0: Vec2 }
+    | { type: 'ulpoint'; px: PxPoint }
+    | { type: 'uldrag'; ref: string; moved: boolean }
+    | { type: 'ulmove'; start: Vec2; base: UnderlayMeta; moved: boolean }
     | null
   >(null);
+  // ルーペ（指の下を拡大表示：下絵上の点を正確に置くため）
+  const [loupe, setLoupe] = useState<{ x: number; y: number } | null>(null);
   const longPress = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [rotLabel, setRotLabel] = useState<{ x: number; y: number; text: string } | null>(null);
   const clearLong = (): void => {
@@ -224,6 +256,8 @@ export function DrawingCanvas({ problems }: { problems: Set<string> }): JSX.Elem
   const startPinch = (): void => {
     const g = gesture.current;
     if (g && (g.type === 'move' || g.type === 'rotate' || g.type === 'vertex') && (('moved' in g && g.moved) || g.type === 'vertex')) st.cancelLive();
+    if (g && (g.type === 'uldrag' || g.type === 'ulmove')) st.cancelLive();
+    setLoupe(null);
     setRotLabel(null);
     clearLong();
     const [a, b] = [...pointers.current.values()];
@@ -249,6 +283,26 @@ export function DrawingCanvas({ problems }: { problems: Set<string> }): JSX.Elem
     const hit = target?.getAttribute('data-hit');
     const id = target?.getAttribute('data-id') ?? '';
     const w = toWorld(p.x, p.y);
+
+    // ---- 下絵ツール ----
+    const ul = doc.underlay;
+    if (ul && isUnderlayTool(st.tool)) {
+      if (ul.locked) return;
+      if (st.tool === 'ulMove') {
+        st.beginLive('下絵の移動');
+        gesture.current = { type: 'ulmove', start: w, base: ul, moved: false };
+        return;
+      }
+      if (hit === 'ulpt' && !id.startsWith('pend:')) {
+        st.beginLive('点の移動');
+        gesture.current = { type: 'uldrag', ref: id, moved: false };
+        setLoupe(p);
+        return;
+      }
+      gesture.current = { type: 'ulpoint', px: worldToPx(ul, w) };
+      setLoupe(p);
+      return;
+    }
 
     if (hit === 'rotate' && rotHandle) {
       const ids = new Set(useProject.getState().selIds);
@@ -334,6 +388,44 @@ export function DrawingCanvas({ problems }: { problems: Set<string> }): JSX.Elem
       const ndx = (mid.x - size.w / 2) / s;
       const ndy = (mid.y - size.h / 2) / s;
       setView({ ...g.view, s, cx: ax - (ndx * Math.cos(r) - ndy * Math.sin(r)), cy: ay - (ndx * Math.sin(r) + ndy * Math.cos(r)) });
+      return;
+    }
+    if (g.type === 'ulpoint' && doc.underlay) {
+      g.px = worldToPx(doc.underlay, toWorld(p.x, p.y));
+      setLoupe(p);
+      return;
+    }
+    if (g.type === 'uldrag') {
+      const w = toWorld(p.x, p.y);
+      g.moved = true;
+      setLoupe(p);
+      st.live((d) => {
+        const u = d.underlay;
+        if (!u) return d;
+        const q = worldToPx(u, w);
+        const [kind, key] = g.ref.split(':');
+        if (kind === 'trace') return { ...d, underlay: { ...u, trace: u.trace.map((x, i) => (i === Number(key) ? q : x)) } };
+        if (kind === 'measure') return { ...d, underlay: { ...u, measure: u.measure.map((x, i) => (i === Number(key) ? q : x)) } };
+        if (kind === 'cal' && u.calibration) {
+          const cal = { ...u.calibration, [key]: q };
+          // 実寸を入力済みなら縮尺を追従（もう一方の点を基点に固定）
+          if (cal.length > 0 && pxDist(cal.a, cal.b) > 5) {
+            const other = key === 'a' ? cal.b : cal.a;
+            const scale = cal.length / pxDist(cal.a, cal.b);
+            const pivotW = pxToWorld(u, other);
+            const t = keepPivot(u, { scale, rotation: u.rotation }, pivotW);
+            return { ...d, underlay: { ...u, calibration: cal, scale, ...t } };
+          }
+          return { ...d, underlay: { ...u, calibration: cal } };
+        }
+        return d;
+      });
+      return;
+    }
+    if (g.type === 'ulmove') {
+      const w = toWorld(p.x, p.y);
+      g.moved = true;
+      st.live((d) => (d.underlay ? { ...d, underlay: { ...d.underlay, tx: g.base.tx + (w.x - g.start.x), ty: g.base.ty + (w.y - g.start.y) } } : d));
       return;
     }
     if (g.type === 'pan') {
@@ -443,9 +535,23 @@ export function DrawingCanvas({ problems }: { problems: Set<string> }): JSX.Elem
     }
     if (pointers.current.size > 0) return;
     if (e.type === 'pointercancel') {
-      if (g && (g.type === 'move' || g.type === 'rotate' || g.type === 'vertex')) st.cancelLive();
+      if (g && (g.type === 'move' || g.type === 'rotate' || g.type === 'vertex' || g.type === 'uldrag' || g.type === 'ulmove')) st.cancelLive();
       gesture.current = null;
       setRotLabel(null);
+      setLoupe(null);
+      return;
+    }
+    if (g?.type === 'ulpoint') {
+      setLoupe(null);
+      if (e.type !== 'pointercancel') placeUnderlayPoint(g.px);
+      gesture.current = null;
+      return;
+    }
+    if (g?.type === 'uldrag' || g?.type === 'ulmove') {
+      setLoupe(null);
+      if (g.moved) st.endLive();
+      else st.cancelLive();
+      gesture.current = null;
       return;
     }
     if (g?.type === 'pan' && !g.moved) {
@@ -552,7 +658,8 @@ export function DrawingCanvas({ problems }: { problems: Set<string> }): JSX.Elem
           </pattern>
         </defs>
         {doc.mode === 'cad' && <rect width={size.w} height={size.h} fill="url(#grid)" />}
-        <g transform={tf}>
+        <g transform={tf} id="ldc-scene">
+          {doc.underlay && <UnderlayImage u={doc.underlay} />}
           {prims.map((p, i) => renderPrim(p, i, view))}
           {vertexHandles &&
             site!.map((q, i) => {
@@ -584,7 +691,8 @@ export function DrawingCanvas({ problems }: { problems: Set<string> }): JSX.Elem
                 style={{ cursor: 'move' }}
               />
             ))}
-          {rotHandle && (
+          {doc.underlay && <UnderlayOverlay u={doc.underlay} s={view.s} />}
+          {rotHandle && !isUnderlayTool(st.tool) && (
             <g data-testid="rotate-handle-group">
               <line x1={rotHandle.c.x} y1={-rotHandle.c.y} x2={rotHandle.h.x} y2={-rotHandle.h.y} stroke="#e4002b" strokeWidth={1.5 / view.s} strokeDasharray={`${4 / view.s} ${3 / view.s}`} pointerEvents="none" />
               <circle cx={rotHandle.c.x} cy={-rotHandle.c.y} r={3 / view.s} fill="#e4002b" pointerEvents="none" />
@@ -596,6 +704,7 @@ export function DrawingCanvas({ problems }: { problems: Set<string> }): JSX.Elem
           )}
         </g>
       </svg>
+      {loupe && <Loupe x={loupe.x} y={loupe.y} w={size.w} />}
       {rotLabel && (
         <div className="pointer-events-none absolute -translate-x-1/2 rounded bg-ink px-2 py-1 font-mono text-[15px] font-bold text-white" style={{ left: rotLabel.x, top: rotLabel.y }} data-testid="rotate-label">
           {rotLabel.text}
@@ -624,6 +733,33 @@ export function DrawingCanvas({ problems }: { problems: Set<string> }): JSX.Elem
         </div>
       )}
     </div>
+  );
+}
+
+/** 指で隠れる位置を拡大して表示（十字線の中心＝配置位置） */
+function Loupe({ x, y, w }: { x: number; y: number; w: number }): JSX.Element {
+  const R = 64;
+  const Z = 3;
+  const left = Math.min(Math.max(x - R, 4), w - 2 * R - 4);
+  const top = y - 2 * R - 36 < 4 ? y + 36 : y - 2 * R - 36;
+  return (
+    <svg className="pointer-events-none absolute rounded-full border-2 border-ink bg-white shadow-xl" style={{ left, top, width: 2 * R, height: 2 * R }} viewBox={`0 0 ${2 * R} ${2 * R}`} data-testid="loupe">
+      <defs>
+        <clipPath id="loupe-clip">
+          <circle cx={R} cy={R} r={R - 1} />
+        </clipPath>
+      </defs>
+      <g clipPath="url(#loupe-clip)">
+        <rect width={2 * R} height={2 * R} fill="#fbfcfc" />
+        <g transform={`translate(${R} ${R}) scale(${Z}) translate(${-x} ${-y})`}>
+          <use href="#ldc-scene" />
+        </g>
+      </g>
+      <line x1={R} y1={R - 18} x2={R} y2={R - 4} stroke="#e4002b" strokeWidth={1.5} />
+      <line x1={R} y1={R + 4} x2={R} y2={R + 18} stroke="#e4002b" strokeWidth={1.5} />
+      <line x1={R - 18} y1={R} x2={R - 4} y2={R} stroke="#e4002b" strokeWidth={1.5} />
+      <line x1={R + 4} y1={R} x2={R + 18} y2={R} stroke="#e4002b" strokeWidth={1.5} />
+    </svg>
   );
 }
 

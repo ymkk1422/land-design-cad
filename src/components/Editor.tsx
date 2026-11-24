@@ -13,6 +13,9 @@ import { ParkingPanel } from '@/components/parking/ParkingPanel';
 import { ObjectsPanel } from '@/components/property-panel/ObjectsPanel';
 import { SelectionPanel } from '@/components/property-panel/SelectionPanel';
 import { OutputPanel } from '@/components/dialogs/OutputPanel';
+import { UnderlayPanel } from '@/components/underlay/UnderlayPanel';
+import { useUnderlayUi } from '@/stores/underlayUi';
+import { isUnderlayTool } from '@/stores/projectStore';
 import { Btn, cx } from '@/components/ui';
 import { currentSite } from '@/engine/export/drawingModel';
 import { checkInterference } from '@/engine/validation/interference';
@@ -21,9 +24,10 @@ import { m2ToTsubo } from '@/engine/area-calculation';
 import { deleteSelection, duplicateSelection, rotateSelection, SEL_NAME } from '@/components/selectionActions';
 import { ELEMENT_NAMES, OBSTACLE_STYLE } from '@/engine/export/drawingModel';
 
-export type PanelTab = 'land' | 'parking' | 'objects' | 'selection' | 'output';
+export type PanelTab = 'land' | 'underlay' | 'parking' | 'objects' | 'selection' | 'output';
 const TABS: { k: PanelTab; label: string; icon: string }[] = [
   { k: 'land', label: '土地', icon: '⬠' },
+  { k: 'underlay', label: '下絵', icon: '▧' },
   { k: 'parking', label: '駐車場', icon: 'P' },
   { k: 'objects', label: '設備', icon: '▦' },
   { k: 'selection', label: '選択', icon: '◎' },
@@ -60,6 +64,20 @@ export function Editor({ onBack, initialTab = 'land' }: { onBack: () => void; in
   useEffect(() => {
     if (st.selIds.length) setTab('selection');
   }, [st.selIds.join('|')]);
+  // 他の画面からタブを開く（例：土地タブの「測量図から作成」）
+  useEffect(() => {
+    const h = (e: Event): void => {
+      setTab((e as CustomEvent<PanelTab>).detail);
+      setSheet((s) => (s === 'closed' ? 'half' : s));
+    };
+    window.addEventListener('ldc:open-tab', h);
+    return () => window.removeEventListener('ldc:open-tab', h);
+  }, []);
+  // 下絵上で点を置くツールを選んだら、図面を広く見せる
+  useEffect(() => {
+    if (isUnderlayTool(st.tool) && st.tool !== 'ulMove' && layout !== 'desktop') setSheet('closed');
+  }, [st.tool, layout]);
+
   // 図面に触れたら、全面表示のシートは半分まで下げて図面を見せる
   useEffect(() => {
     const h = (): void => setSheet((s) => (s === 'full' ? 'half' : s));
@@ -101,6 +119,7 @@ export function Editor({ onBack, initialTab = 'land' }: { onBack: () => void; in
   const panel = (
     <>
       {tab === 'land' && <LandPanel />}
+      {tab === 'underlay' && <UnderlayPanel />}
       {tab === 'parking' && <ParkingPanel report={report} />}
       {tab === 'objects' && <ObjectsPanel />}
       {tab === 'selection' && <SelectionPanel />}
@@ -171,7 +190,7 @@ export function Editor({ onBack, initialTab = 'land' }: { onBack: () => void; in
             <CanvasOverlay addLabel={addLabel} compact={false} />
           </main>
           <aside className="flex w-[360px] shrink-0 flex-col border-l border-neutral-200">
-            <div className="grid grid-cols-5 border-b border-neutral-200" role="tablist">
+            <div className="grid grid-cols-6 border-b border-neutral-200" role="tablist">
               {TABS.map((t) => (
                 <button key={t.k} role="tab" aria-selected={tab === t.k} data-testid={`tab-${t.k}`} onClick={() => setTab(t.k)} className={cx('min-h-[44px] text-[13px]', tab === t.k ? 'border-b-2 border-teal font-bold text-teal' : 'text-neutral-600')}>
                   {t.label}
@@ -256,9 +275,9 @@ export function Editor({ onBack, initialTab = 'land' }: { onBack: () => void; in
                 </div>
               </section>
             )}
-            <nav className="flex w-[60px] shrink-0 flex-col border-l border-neutral-200 bg-white" aria-label="メニュー" style={{ paddingBottom: 'env(safe-area-inset-bottom)', paddingRight: 'env(safe-area-inset-right)' }}>
+            <nav className="flex w-[60px] shrink-0 flex-col overflow-y-auto overscroll-contain border-l border-neutral-200 bg-white" aria-label="メニュー" style={{ paddingBottom: 'env(safe-area-inset-bottom)', paddingRight: 'env(safe-area-inset-right)' }}>
               {TABS.map((t) => (
-                <button key={t.k} data-testid={`mtab-${t.k}`} onClick={() => openTab(t.k)} className={cx('flex min-h-[56px] flex-1 flex-col items-center justify-center text-[11px]', tab === t.k && sheet !== 'closed' ? 'bg-teal-light font-bold text-teal' : 'text-neutral-600')}>
+                <button key={t.k} data-testid={`mtab-${t.k}`} onClick={() => openTab(t.k)} className={cx('flex min-h-[46px] flex-1 flex-col items-center justify-center text-[11px] leading-tight', tab === t.k && sheet !== 'closed' ? 'bg-teal-light font-bold text-teal' : 'text-neutral-600')}>
                   <span className="text-[18px] leading-none">{t.icon}</span>
                   {t.label}
                 </button>
@@ -269,7 +288,7 @@ export function Editor({ onBack, initialTab = 'land' }: { onBack: () => void; in
       </div>
 
       {layout === 'bottom' && showChrome && (
-        <nav className="grid shrink-0 grid-cols-5 border-t border-neutral-200 bg-white" aria-label="メニュー" style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}>
+        <nav className="grid shrink-0 grid-cols-6 border-t border-neutral-200 bg-white" aria-label="メニュー" style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}>
           {TABS.map((t) => (
             <button key={t.k} data-testid={`mtab-${t.k}`} onClick={() => openTab(t.k)} className={cx('flex min-h-[54px] flex-col items-center justify-center text-[12px]', tab === t.k && sheet !== 'closed' ? 'font-bold text-teal' : 'text-neutral-600')}>
               <span className="text-[18px] leading-none">{t.icon}</span>
@@ -355,13 +374,15 @@ function CanvasOverlay({ addLabel, compact, maximized, onToggleMax, onDetails }:
     <>
       {/* 配置モード表示 */}
       {addLabel && (
-        <div className="absolute left-1/2 top-[60px] z-10 flex -translate-x-1/2 items-center gap-2 rounded-full bg-ink py-1 pl-4 pr-1 text-[14px] text-white shadow-lg" data-testid="add-banner">
+        <div className="pointer-events-none absolute left-1/2 top-2 z-10 flex h-11 max-w-[calc(100%-16px)] -translate-x-1/2 items-center gap-2 whitespace-nowrap rounded-full bg-ink/90 pl-4 pr-1 text-[14px] text-white shadow-lg" data-testid="add-banner">
           タップで{addLabel}
-          <button className="h-9 rounded-full bg-white/20 px-3 text-[14px] active:bg-white/30" onClick={() => st.setTool('select')} data-testid="add-done">
+          <button className="pointer-events-auto h-9 rounded-full bg-white/20 px-3 text-[14px] active:bg-white/30" onClick={() => st.setTool('select')} data-testid="add-done">
             終了
           </button>
         </div>
       )}
+
+      <UnderlayBanner />
 
       {/* 右下：表示操作 */}
       {compact && (
@@ -415,6 +436,30 @@ function CanvasOverlay({ addLabel, compact, maximized, onToggleMax, onDetails }:
         </div>
       )}
     </>
+  );
+}
+
+/** 下絵ツール使用中の案内（パネルを閉じていても手順がわかるように） */
+function UnderlayBanner(): JSX.Element | null {
+  const tool = useProject((x) => x.tool);
+  const setTool = useProject((x) => x.setTool);
+  const status = useUnderlayUi((x) => x.status);
+  const pending = useUnderlayUi((x) => x.pending);
+  if (!isUnderlayTool(tool)) return null;
+  const msg =
+    status ??
+    { ulMove: '下絵をドラッグして移動', ulCalibrate: '基準寸法の2点をタップ', ulRotate: '水平・垂直にする線の2点をタップ', ulTrace: '敷地の角を順にタップ', ulMeasure: '測る2点をタップ' }[tool];
+  return (
+    // 案内文はタップを透過（下の図面に点を置ける）。完了ボタンだけが反応する
+    <div className="pointer-events-none absolute inset-x-2 top-2 z-10 mx-auto flex h-12 max-w-[520px] items-center gap-2 rounded-2xl bg-[#d9480f]/90 pl-3 pr-1.5 text-[14px] text-white shadow-lg" data-testid="underlay-banner">
+      <span className="min-w-0 flex-1 truncate">
+        {msg}
+        {pending.length ? '（1点目を指定済み）' : ''}
+      </span>
+      <button className="pointer-events-auto h-10 shrink-0 rounded-xl bg-white/25 px-3 active:bg-white/35" onClick={() => (setTool('select'), useUnderlayUi.getState().setPending([]), useUnderlayUi.getState().setStatus(null))} data-testid="underlay-tool-done">
+        完了
+      </button>
+    </div>
   );
 }
 

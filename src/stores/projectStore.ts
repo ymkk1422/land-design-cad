@@ -7,7 +7,10 @@ import { currentSite } from '@/engine/export/drawingModel';
 import type { StorageAdapter } from '@/services/storage';
 
 export type SelKind = 'stall' | 'obstacle' | 'aisle' | 'element' | 'vertex' | 'entrance' | null;
-export type Tool = 'select' | 'pan' | 'addStall' | 'addObstacle' | 'addElement' | 'vertex' | 'addAisle';
+export type Tool = 'select' | 'pan' | 'addStall' | 'addObstacle' | 'addElement' | 'vertex' | 'addAisle' | UnderlayTool;
+/** 下絵ツール：移動／基準寸法の2点／回転補正の2点／頂点配置／距離測定 */
+export type UnderlayTool = 'ulMove' | 'ulCalibrate' | 'ulRotate' | 'ulTrace' | 'ulMeasure';
+export const isUnderlayTool = (t: Tool): t is UnderlayTool => t.startsWith('ul');
 export type SaveState = 'saved' | 'dirty' | 'saving' | 'error';
 
 const HISTORY_LIMIT = 80;

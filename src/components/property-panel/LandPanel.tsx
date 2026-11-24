@@ -40,6 +40,11 @@ export function LandPanel(): JSX.Element {
 
   return (
     <div data-testid="land-panel">
+      <div className="border-b border-neutral-200 px-3 py-2">
+        <Btn className="w-full" onClick={() => window.dispatchEvent(new CustomEvent('ldc:open-tab', { detail: 'underlay' }))} testId="land-from-underlay">
+          ▧ 測量図（PDF・画像）から作成
+        </Btn>
+      </div>
       <Section title="土地の形状">
         <div className="grid grid-cols-[1fr_auto] items-center gap-2">
           <Select

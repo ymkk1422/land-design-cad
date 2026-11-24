@@ -23,7 +23,7 @@ const r = await build({
     'process.env.NEXT_PUBLIC_SUPABASE_URL': '""',
     'process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY': '""',
   },
-  external: ['@supabase/supabase-js', 'html2canvas', 'dompurify', 'canvg'],
+  external: ['@supabase/supabase-js', 'html2canvas', 'dompurify', 'canvg', 'canvas', 'path2d-polyfill'],
   logLevel: 'warning',
 });
 const js = r.outputFiles[0].text.replace(/<\/script/gi, '<\\/script');
@@ -31,6 +31,9 @@ execSync(`npx tailwindcss -i src/app/globals.css -o ${path.join(out, 'app.css')}
 const css = fs.readFileSync(path.join(out, 'app.css'), 'utf8');
 fs.rmSync(path.join(out, 'app.css'));
 fs.copyFileSync(path.join(root, 'public/fonts/NotoSansJP-subset.ttf'), path.join(out, 'fonts/NotoSansJP-subset.ttf'));
+// PDF 描画用ワーカー（下絵の取込）
+fs.copyFileSync(path.join(root, 'public/pdf.worker.min.js'), path.join(out, 'pdf.worker.min.js'));
+fs.copyFileSync(path.join(root, 'public/pdf.min.js'), path.join(out, 'pdf.min.js'));
 
 const html = `<!DOCTYPE html>
 <html lang="ja">

@@ -66,6 +66,28 @@ export function NumericKeypad(): JSX.Element | null {
     }
   }, [req]);
 
+  // PC：物理キーボードでも入力できる
+  useEffect(() => {
+    if (!req) return;
+    const h = (e: KeyboardEvent): void => {
+      const map: Record<string, string> = { Backspace: '⌫', Delete: 'C', '-': '±' };
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        document.querySelector<HTMLButtonElement>('[data-testid="kp-ok"]')?.click();
+      } else if (e.key === 'Escape') close();
+      else if (e.key === 'Tab') {
+        e.preventDefault();
+        document.querySelector<HTMLButtonElement>('[data-testid="kp-next"]')?.click();
+      } else if (/^[0-9.]$/.test(e.key) || map[e.key]) {
+        e.preventDefault();
+        const k = map[e.key] ?? e.key;
+        document.querySelector<HTMLButtonElement>(`[data-testid="${k === '.' ? 'kp-dot' : k === '⌫' ? 'kp-back' : k === 'C' ? 'kp-clear' : k === '±' ? 'kp-sign' : `kp-${k}`}"]`)?.click();
+      }
+    };
+    window.addEventListener('keydown', h);
+    return () => window.removeEventListener('keydown', h);
+  }, [req, close]);
+
   if (!req) return null;
   const { mode } = req;
 

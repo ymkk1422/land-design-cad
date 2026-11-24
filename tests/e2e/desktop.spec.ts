@@ -84,8 +84,9 @@ test('駐車場：自動配置→複数案比較→適用、モード切替、�
   const x0 = Number(await page.getByTestId('sel-x').inputValue());
   await fill(page, 'sel-x', String(x0 + 0.5));
   await expect(page.getByTestId('sel-x')).toHaveValue(String(Math.round((x0 + 0.5) * 1000) / 1000));
+  const ang0 = await page.getByTestId('sel-angle').inputValue();
   await page.getByTestId('rotate-90').click();
-  await expect(page.getByTestId('sel-angle')).not.toHaveValue('0');
+  await expect(page.getByTestId('sel-angle')).not.toHaveValue(ang0);
   await page.getByTestId('duplicate').click();
   await expect(page.getByTestId('stall-count').or(page.getByTestId('header-count'))).toBeVisible();
   await expect(page.getByTestId('header-count')).toHaveText(String(firstCount + 1));

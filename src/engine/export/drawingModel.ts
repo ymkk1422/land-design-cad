@@ -30,6 +30,8 @@ export interface ModelOptions {
   problems?: Set<string>;
   /** 線幅の基準（文字単位） */
   lineUnit?: number;
+  /** 下絵を表示中：敷地・道路の塗りを透明にして下絵を透かす */
+  seeThrough?: boolean;
 }
 
 const flip = (p: Vec2): Vec2 => ({ x: p.x, y: -p.y });
@@ -120,7 +122,7 @@ export function buildModel(doc: ProjectDoc, o: ModelOptions): Prim[] {
         { x: b.x + t.x * ext + out.x * r.width, y: b.y + t.y * ext + out.y * r.width },
         { x: a.x - t.x * ext + out.x * r.width, y: a.y - t.y * ext + out.y * r.width },
       ];
-      prims.push({ t: 'poly', pts: q.map(flip), fill: cad ? '#ffffff' : '#e9ebee', stroke: '#8a8f96', sw: lw * 0.6, dash: cad ? [lw * 6, lw * 3] : undefined, layer: 'road' });
+      prims.push({ t: 'poly', pts: q.map(flip), fill: o.seeThrough ? 'none' : cad ? '#ffffff' : '#e9ebee', stroke: '#8a8f96', sw: lw * 0.6, dash: cad ? [lw * 6, lw * 3] : undefined, layer: 'road' });
       const mid = { x: (a.x + b.x) / 2 + out.x * r.width * 0.72, y: (a.y + b.y) / 2 + out.y * r.width * 0.72 };
       const ang = (-Math.atan2(t.y, t.x) * 180) / Math.PI;
       const rot = ang > 90 || ang < -90 ? ang + 180 : ang;
@@ -128,7 +130,7 @@ export function buildModel(doc: ProjectDoc, o: ModelOptions): Prim[] {
     }
 
     // 敷地
-    prims.push({ t: 'poly', pts: sp, fill: cad ? '#ffffff' : '#f3f6f4', stroke: '#14161a', sw: lw * (cad ? 1.6 : 2.2), layer: 'site', id: 'site' });
+    prims.push({ t: 'poly', pts: sp, fill: o.seeThrough ? 'none' : cad ? '#ffffff' : '#f3f6f4', stroke: '#14161a', sw: lw * (cad ? 1.6 : 2.2), layer: 'site', id: 'site' });
 
     // 通路
     if (d.showAisles || !cad) {

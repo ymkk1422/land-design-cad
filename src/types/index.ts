@@ -260,6 +260,48 @@ export interface DisplaySettings {
   unit: LengthUnit;
 }
 
+// ===== 下絵（既存の測量図PDF・画像） =====
+/** 画像のピクセル座標（左上原点、右=+u、下=+v） */
+export interface PxPoint {
+  u: number;
+  v: number;
+}
+
+export type UnderlaySource = 'application/pdf' | 'image/png' | 'image/jpeg';
+
+/**
+ * 下絵のメタデータ（CADデータ側に保存）。画像本体はアセットとして別保存し、ここでは ID のみ参照する。
+ * 画像→実寸の変換：world = (tx,ty) + R(rotation)·(scale·u, −scale·v)
+ */
+export interface UnderlayMeta {
+  originalAssetId: string; // 読み込んだ元ファイル（PDF/PNG/JPEG）そのもの
+  displayAssetId: string; // 表示用ラスタ（PDFはページを描画した画像、画像は縮小版または元画像）
+  fileName: string;
+  source: UnderlaySource;
+  pdfPage?: number;
+  pdfPageCount?: number;
+  /** PDFページの用紙寸法（mm）。図面縮尺からの縮尺合わせに使用 */
+  paperMm?: { w: number; h: number };
+  pxWidth: number; // 表示用ラスタの画素数
+  pxHeight: number;
+  /** 元画像の画素数に対する表示用ラスタの倍率（DPI計算用） */
+  rasterScale: number;
+  scale: number; // m / px（表示用ラスタ基準）
+  scaleMethod: 'none' | 'reference' | 'pdf-scale' | 'dpi';
+  rotation: number; // 度（反時計回り）
+  tx: number;
+  ty: number;
+  opacity: number; // 0..1
+  visible: boolean;
+  locked: boolean;
+  calibration: { a: PxPoint; b: PxPoint; length: number } | null;
+  /** 画像上に配置した頂点（画像座標で保持：縮尺を直すと距離も追従） */
+  trace: PxPoint[];
+  measure: PxPoint[];
+  /** 下絵と作成したCAD形状の位置合わせ誤差（m）。下絵から作図した場合のみ */
+  fitError?: number;
+}
+
 export interface ProjectDoc {
   id: string;
   name: string;
@@ -281,6 +323,9 @@ export interface ProjectDoc {
   northAngle: number; // 方位（度）。0=図面上方向が北
   notes: string;
   activePlanName?: string;
+  underlay?: UnderlayMeta | null;
+  /** このプロジェクトが使用した（したことのある）アセット ID。プロジェクト削除時に一括削除 */
+  assetIds?: string[];
   /** 編集履歴（操作ログ。全状態はバージョン保存で保持） */
   historyLog?: { label: string; at: string }[];
   schemaVersion: number;

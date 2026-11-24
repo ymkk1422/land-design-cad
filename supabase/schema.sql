@@ -98,3 +98,22 @@ create policy versions_owner_delete on public.project_versions
   for delete to authenticated using (user_id = auth.uid());
 
 grant execute on function public.save_project(text, text, jsonb, double precision, integer, text, boolean, text) to authenticated;
+
+-- ===== 下絵（測量図PDF・画像）の保存：Storage バケット =====
+-- 図面データ（projects.doc）とは分離し、ファイル本体はここに保存する。パス先頭 = ユーザーID。
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values ('underlays', 'underlays', false, 31457280, array['application/pdf', 'image/png', 'image/jpeg'])
+on conflict (id) do nothing;
+
+drop policy if exists underlays_owner_select on storage.objects;
+create policy underlays_owner_select on storage.objects for select to authenticated
+  using (bucket_id = 'underlays' and (storage.foldername(name))[1] = auth.uid()::text);
+drop policy if exists underlays_owner_insert on storage.objects;
+create policy underlays_owner_insert on storage.objects for insert to authenticated
+  with check (bucket_id = 'underlays' and (storage.foldername(name))[1] = auth.uid()::text);
+drop policy if exists underlays_owner_update on storage.objects;
+create policy underlays_owner_update on storage.objects for update to authenticated
+  using (bucket_id = 'underlays' and (storage.foldername(name))[1] = auth.uid()::text);
+drop policy if exists underlays_owner_delete on storage.objects;
+create policy underlays_owner_delete on storage.objects for delete to authenticated
+  using (bucket_id = 'underlays' and (storage.foldername(name))[1] = auth.uid()::text);

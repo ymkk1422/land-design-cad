@@ -95,6 +95,8 @@ export interface ExportOptions {
   title?: string;
   notes?: string;
   date?: Date;
+  /** 下絵を重ねて出力（href は data URL） */
+  underlay?: { href: string; matrix: [number, number, number, number, number, number]; opacity: number; w: number; h: number };
 }
 
 /** 出力用SVG（viewBox=用紙mm）。縮尺バーは既知の基準長で描画し検証可能にする */
@@ -111,7 +113,13 @@ export function buildExportSvg(doc: ProjectDoc, opt: ExportOptions): { svg: stri
   const textUnit = (1 / L.k) * 0.27;
   const prims = buildModel({ ...doc, mode: opt.mode }, { mode: opt.mode, textUnit, sitePoints: site, lineUnit: 1 });
   const tf = (p: Vec2): Vec2 => toPaper(L, p);
-  const body = primsToSvg(prims, tf, L.k);
+  let body = primsToSvg(prims, tf, L.k);
+  if (opt.underlay) {
+    const [a, b, c, d, e, f2] = opt.underlay.matrix;
+    const k = L.k;
+    const m = [k * a, k * b, k * c, k * d, L.ox + k * e, L.oy + k * f2].map((v) => f(v)).join(' ');
+    body = `<image href="${opt.underlay.href.replace(/"/g, '')}" x="0" y="0" width="${opt.underlay.w}" height="${opt.underlay.h}" transform="matrix(${m})" opacity="${opt.underlay.opacity}" preserveAspectRatio="none"/>` + body;
+  }
   const area = L.area;
 
   // 縮尺バー（基準寸法）

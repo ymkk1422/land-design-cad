@@ -1,0 +1,7 @@
+.env*.local
+.next
+dist-artifact
+node_modules
+out
+playwright-report
+test-results

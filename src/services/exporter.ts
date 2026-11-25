@@ -49,6 +49,8 @@ export async function exportPdf(doc: ProjectDoc, opt: ExportOptions): Promise<{ 
   return { blob: pdf.output('blob'), warnings };
 }
 
+import { setJpegDpi, setPngDpi } from '@/engine/export/dpi';
+
 export async function exportRaster(doc: ProjectDoc, opt: ExportOptions, format: 'png' | 'jpeg', dpi = 200): Promise<{ blob: Blob; warnings: string[] }> {
   const { svg, warnings } = buildExportSvg(doc, opt);
   const P = PAPER_MM[opt.paper];
@@ -70,7 +72,12 @@ export async function exportRaster(doc: ProjectDoc, opt: ExportOptions, format: 
     ctx.fillStyle = '#fff';
     ctx.fillRect(0, 0, pxW, pxH);
     ctx.drawImage(img, 0, 0, pxW, pxH);
-    const blob = await new Promise<Blob>((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error('画像の生成に失敗しました'))), format === 'png' ? 'image/png' : 'image/jpeg', 0.92));
+    const raw = await new Promise<Blob>((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error('画像の生成に失敗しました'))), format === 'png' ? 'image/png' : 'image/jpeg', 0.92));
+    c.width = c.height = 0; // iOS のメモリ解放
+    // 解像度を書き込み、印刷時に用紙寸法（＝縮尺）どおりになるようにする
+    const bytes = new Uint8Array(await raw.arrayBuffer());
+    const fixed = format === 'png' ? setPngDpi(bytes, dpi) : setJpegDpi(bytes, dpi);
+    const blob = new Blob([fixed], { type: raw.type });
     return { blob, warnings };
   } finally {
     URL.revokeObjectURL(url);

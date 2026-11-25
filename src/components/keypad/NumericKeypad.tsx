@@ -70,11 +70,16 @@ export function NumericKeypad(): JSX.Element | null {
   useEffect(() => {
     if (!req) return;
     const h = (e: KeyboardEvent): void => {
+      // テンキー表示中のキー入力はテンキーだけが受け取る（図面側の Delete/Backspace による選択削除や Ctrl+Z を発火させない）
+      e.stopImmediatePropagation();
       const map: Record<string, string> = { Backspace: '⌫', Delete: 'C', '-': '±' };
       if (e.key === 'Enter') {
         e.preventDefault();
         document.querySelector<HTMLButtonElement>('[data-testid="kp-ok"]')?.click();
-      } else if (e.key === 'Escape') close();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        close();
+      }
       else if (e.key === 'Tab') {
         e.preventDefault();
         document.querySelector<HTMLButtonElement>('[data-testid="kp-next"]')?.click();
@@ -84,8 +89,8 @@ export function NumericKeypad(): JSX.Element | null {
         document.querySelector<HTMLButtonElement>(`[data-testid="${k === '.' ? 'kp-dot' : k === '⌫' ? 'kp-back' : k === 'C' ? 'kp-clear' : k === '±' ? 'kp-sign' : `kp-${k}`}"]`)?.click();
       }
     };
-    window.addEventListener('keydown', h);
-    return () => window.removeEventListener('keydown', h);
+    window.addEventListener('keydown', h, true);
+    return () => window.removeEventListener('keydown', h, true);
   }, [req, close]);
 
   if (!req) return null;

@@ -46,7 +46,8 @@ interface State {
   setStorage(s: StorageAdapter): void;
   load(doc: ProjectDoc): void;
   close(): void;
-  commit(label: string, fn: (d: ProjectDoc) => ProjectDoc): void;
+  /** coalesce: 同じ操作名の連続した変更（文字入力など）を1つの履歴にまとめる */
+  commit(label: string, fn: (d: ProjectDoc) => ProjectDoc, opts?: { coalesce?: boolean }): void;
   beginLive(label: string): void;
   live(fn: (d: ProjectDoc) => ProjectDoc): void;
   endLive(): void;
@@ -79,6 +80,9 @@ function keepSelection(s: { selKind: SelKind; selIds: string[] }, d: ProjectDoc)
   return { selKind: ids.length ? s.selKind : null, selIds: ids };
 }
 let liveBase: { label: string; doc: ProjectDoc } | null = null;
+/** 直前の「まとめ可能な」変更（文字入力の1文字ごとに履歴が増えないようにする） */
+let lastCoalesce: { label: string; t: number } | null = null;
+const COALESCE_MS = 1500;
 
 const stamp = (d: ProjectDoc, label: string): ProjectDoc => ({
   ...d,
@@ -109,26 +113,32 @@ export const useProject = create<State>((set, get) => ({
   lastSavedAt: null,
 
   setStorage: (s) => set({ storage: s }),
-  load: (doc) => set({ doc, past: [], future: [], selKind: null, selIds: [], plans: [], bounds: null, angleSummary: [], saveState: 'saved', optimizeError: null }),
+  load: (doc) => (lastCoalesce = null, set({ doc, past: [], future: [], selKind: null, selIds: [], plans: [], bounds: null, angleSummary: [], saveState: 'saved', optimizeError: null })),
   close: () => {
     abort?.abort();
     set({ doc: null, past: [], future: [], plans: [], selIds: [], selKind: null, optimizing: null });
   },
 
-  commit: (label, fn) => {
+  commit: (label, fn, opts) => {
     const cur = get().doc;
     if (!cur) return;
     const next = stamp(fn(cur), label);
-    set((s) => ({ doc: next, past: [...s.past, cur].slice(-HISTORY_LIMIT), future: [], saveState: 'dirty' }));
+    const now = Date.now();
+    const merge = !!opts?.coalesce && !!lastCoalesce && lastCoalesce.label === label && now - lastCoalesce.t < COALESCE_MS && get().past.length > 0;
+    lastCoalesce = opts?.coalesce ? { label, t: now } : null;
+    if (merge) set({ doc: next, future: [], saveState: 'dirty' });
+    else set((s) => ({ doc: next, past: [...s.past, cur].slice(-HISTORY_LIMIT), future: [], saveState: 'dirty' }));
   },
   beginLive: (label) => {
+    lastCoalesce = null;
     const cur = get().doc;
     if (cur) liveBase = { label, doc: cur };
   },
   live: (fn) => {
     const cur = get().doc;
     if (!cur) return;
-    set({ doc: fn(cur) });
+    // ドラッグ中の状態も未保存として扱う（途中でアプリが閉じられても最後の表示状態を保存できるように）
+    set({ doc: fn(cur), saveState: 'dirty' });
   },
   endLive: () => {
     const base = liveBase;
@@ -141,26 +151,30 @@ export const useProject = create<State>((set, get) => ({
   cancelLive: () => {
     const base = liveBase;
     liveBase = null;
-    if (base) set({ doc: base.doc });
+    if (base) set({ doc: base.doc, saveState: 'dirty' });
   },
 
   setLand: (land, label = '土地寸法の変更') => {
     get().commit(label, (d) => {
-      const solution = solveLand(land);
-      const sel = solution.candidates.length ? Math.min(d.selectedCandidate, solution.candidates.length - 1) : 0;
-      return { ...d, land, solution, selectedCandidate: sel };
+      // 現在の形状をヒントにして解く：寸法を直しても別の解（三角形の折り返し）へ形状が飛ばない
+      const hint = currentSite(d) ?? d.shapeHint ?? null;
+      const solution = solveLand(land, { hint });
+      const sel = hint ? 0 : solution.candidates.length ? Math.min(d.selectedCandidate, solution.candidates.length - 1) : 0;
+      return { ...d, land, solution, selectedCandidate: sel, shapeHint: solution.candidates[sel]?.points ?? d.shapeHint ?? null };
     });
   },
 
   undo: () => {
     const { past, doc, future } = get();
     if (!past.length || !doc) return;
+    lastCoalesce = null;
     const prev = past[past.length - 1];
     set({ doc: prev, past: past.slice(0, -1), future: [doc, ...future], saveState: 'dirty', ...keepSelection(get(), prev) });
   },
   redo: () => {
     const { past, doc, future } = get();
     if (!future.length || !doc) return;
+    lastCoalesce = null;
     const next = future[0];
     set({ doc: next, past: [...past, doc], future: future.slice(1), saveState: 'dirty', ...keepSelection(get(), next) });
   },

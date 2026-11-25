@@ -2,7 +2,7 @@
 // 1) Supabase（Next.js 版の本番構成。RLS でユーザー単位に分離）
 // 2) Claude Artifact DB（claude.ai 上で公開した版。data/users/<id>/ は本人以外読み書き不可）
 import type { ProjectDoc, ProjectSummary } from '@/types';
-import { migrateProject } from '@/services/projectFactory';
+import { migrateProject, storable } from '@/services/projectFactory';
 import { MAX_VERSIONS, summarize, type StorageAdapter, type VersionInfo } from './index';
 import { base64ToBlob, blobToBase64, MAX_ASSET_BYTES } from './assets';
 
@@ -77,7 +77,7 @@ export class ClaudeDbAdapter implements StorageAdapter {
     return migrateProject(JSON.parse(String(s.data()?.json)));
   }
   async save(doc: ProjectDoc, opts: { snapshot?: boolean; label?: string } = {}): Promise<void> {
-    const json = JSON.stringify({ ...doc, solution: null });
+    const json = JSON.stringify(storable(doc, true));
     JSON.parse(json);
     await this.col().doc(`p_${safeKey(doc.id)}`).set({ kind: 'project', json, updatedAt: doc.updatedAt });
     await this.col().doc(`s_${safeKey(doc.id)}`).set({ kind: 'summary', summary: { ...summarize(doc) } as unknown as Record<string, unknown> });
@@ -175,7 +175,7 @@ export class SupabaseAdapter implements StorageAdapter {
   }
   async save(doc: ProjectDoc, opts: { snapshot?: boolean; label?: string } = {}): Promise<void> {
     const sum = summarize(doc);
-    const body = { ...doc, solution: null };
+    const body = storable(doc, true);
     // サーバー側 save_project 関数が入力検証・バージョン保存をトランザクションで行う
     const { error } = await this.sb.rpc('save_project', {
       p_id: doc.id,

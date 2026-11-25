@@ -114,3 +114,46 @@ export async function sniffType(blob: Blob): Promise<'application/pdf' | 'image/
   if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg';
   return null;
 }
+
+/** 画像として展開してよい最大画素数（展開時のメモリ不足・いわゆる画像爆弾を防ぐ） */
+export const MAX_DECODE_PIXELS = 100_000_000;
+
+/**
+ * 画像を展開する前に、ファイルのヘッダから縦横の画素数を読む（PNG: IHDR、JPEG: SOFn）。
+ * 読めなければ null。
+ */
+export async function imageHeaderSize(blob: Blob): Promise<{ w: number; h: number } | null> {
+  const head = new Uint8Array(await blob.slice(0, Math.min(blob.size, 512 * 1024)).arrayBuffer());
+  if (head[0] === 0x89 && head[1] === 0x50) {
+    if (head.length < 24) return null;
+    const dv = new DataView(head.buffer, head.byteOffset, head.byteLength);
+    return { w: dv.getUint32(16), h: dv.getUint32(20) };
+  }
+  if (head[0] === 0xff && head[1] === 0xd8) {
+    let i = 2;
+    while (i + 9 < head.length) {
+      if (head[i] !== 0xff) {
+        i++;
+        continue;
+      }
+      const m = head[i + 1];
+      if (m === 0xff) {
+        i++;
+        continue;
+      }
+      if (m === 0xd8 || m === 0x01 || (m >= 0xd0 && m <= 0xd7)) {
+        i += 2;
+        continue;
+      }
+      const len = (head[i + 2] << 8) | head[i + 3];
+      // SOF0〜SOF15（DHT=C4, JPG=C8, DAC=CC を除く）
+      if (m >= 0xc0 && m <= 0xcf && m !== 0xc4 && m !== 0xc8 && m !== 0xcc) {
+        return { h: (head[i + 5] << 8) | head[i + 6], w: (head[i + 7] << 8) | head[i + 8] };
+      }
+      if (len < 2) return null;
+      i += 2 + len;
+    }
+    return null;
+  }
+  return null;
+}

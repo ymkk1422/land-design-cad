@@ -276,7 +276,7 @@ function stripLayout(ctx: Ctx, orientation: number, stallAngle: number, vOffset:
       }
       if (hi - lo < 0.5) continue;
       const c = toW({ x: (lo + hi) / 2, y: (y0 + y1) / 2 });
-      aisles.push({ id: '', kind: angled ? 'oneway' : 'twoway', cx: c.x, cy: c.y, w: hi - lo, h: y1 - y0, angle: orientation, direction: 1 });
+      aisles.push({ id: '', kind: angled ? 'oneway' : 'twoway', cx: c.x, cy: c.y, w: hi - lo, h: y1 - y0, angle: orientation, direction: 1, stallAngle });
     }
   };
 

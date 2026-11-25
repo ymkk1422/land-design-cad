@@ -145,6 +145,44 @@ test('PDF・PNG出力', async ({ page }) => {
   expect(ph).toBe('PNG');
 });
 
+test('PDFの実寸：用紙寸法と縮尺バーの長さをPDFから実測する（A3・1/200）', async ({ page }) => {
+  const cspErrors: string[] = [];
+  page.on('console', (m) => {
+    if (m.type() === 'error' && /Content Security Policy/i.test(m.text())) cspErrors.push(m.text());
+  });
+  await newProject(page);
+  await page.getByTestId('tab-output').click();
+  await page.getByTestId('export-paper').selectOption('A3');
+  await page.getByTestId('export-scale').selectOption('200');
+  const [dl] = await Promise.all([page.waitForEvent('download'), page.getByTestId('export-pdf').click()]);
+  const fs = await import('node:fs');
+  const data = new Uint8Array(fs.readFileSync((await dl.path())!));
+  const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  const pdf = await pdfjs.getDocument({ data, isEvalSupported: false, useSystemFonts: false }).promise;
+  expect(pdf.numPages).toBe(1);
+  const pg = await pdf.getPage(1);
+  const [x0, y0, x1, y1] = pg.view;
+  const PT = 72 / 25.4;
+  // A3 横 = 420×297mm
+  expect(Math.abs(x1 - x0 - 420 * PT)).toBeLessThan(0.5);
+  expect(Math.abs(y1 - y0 - 297 * PT)).toBeLessThan(0.5);
+  const tc = await pg.getTextContent();
+  const items = (tc.items as unknown[]).filter((i): i is { str: string; transform: number[]; width: number } => typeof i === 'object' && i !== null && 'str' in i);
+  const all = items.map((i) => i.str).join('');
+  expect(all).toContain('1/200');
+  expect(all).toContain('実際のサイズ');
+  // 縮尺バー：1/200 では 10m = 50mm。「0」の左端から「10m」の中心までが 50mm であること
+  const lab = items.find((i) => i.str === '10m');
+  expect(lab).toBeTruthy();
+  const zero = items.filter((i) => i.str === '0' && Math.abs(i.transform[5] - lab!.transform[5]) < 0.5 && i.transform[4] < lab!.transform[4]).sort((a, b) => b.transform[4] - a.transform[4])[0];
+  expect(zero).toBeTruthy();
+  const barPt = lab!.transform[4] + lab!.width / 2 - zero.transform[4];
+  expect(Math.abs(barPt / PT - 50)).toBeLessThan(0.3);
+  await pdf.destroy();
+  // セキュリティポリシー（CSP）が出力処理（フォント取得・PDF生成）を妨げていない
+  expect(cspErrors).toEqual([]);
+});
+
 test('保存・再編集（リロード後も一覧から再開できる）', async ({ page }) => {
   await newProject(page);
   await page.getByTestId('project-name').fill('保存確認テスト');

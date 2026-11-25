@@ -1,7 +1,7 @@
 // 測量図（PDF・PNG・JPEG）の取込。元ファイルはそのまま保存し、表示用のラスタ画像を別に作る。
 import type { UnderlayMeta } from '@/types';
 import type { StorageAdapter } from '@/services/storage';
-import { MAX_ASSET_BYTES, sniffType } from '@/services/storage/assets';
+import { MAX_ASSET_BYTES, MAX_DECODE_PIXELS, imageHeaderSize, sniffType } from '@/services/storage/assets';
 import { newUnderlay } from '@/engine/underlay/transform';
 import { newId } from '@/engine/parking-optimizer/stallOps';
 
@@ -94,44 +94,58 @@ export async function importUnderlayFile(file: File | Blob, fileName: string, st
   if (file.size === 0) throw new Error('空のファイルです');
   const type = await sniffType(file);
   if (!type) throw new Error('PDF・PNG・JPEG のいずれかを選んでください（ファイルの中身を確認できませんでした）');
-  const originalAssetId = newId('as');
   const original = new Blob([await file.arrayBuffer()], { type });
-  onStage?.('元ファイルを保存中…');
-  await storage.saveAsset(originalAssetId, original);
-
-  if (type === 'application/pdf') {
-    onStage?.('PDFを描画中…');
-    const r = await renderPdfPage(original, 1);
-    const displayAssetId = newId('as');
-    await storage.saveAsset(displayAssetId, r.png);
-    return {
-      meta: newUnderlay({ originalAssetId, displayAssetId, fileName, source: type, pxWidth: r.w, pxHeight: r.h, rasterScale: 1, pdfPage: 1, pdfPageCount: r.pages, paperMm: r.paperMm }),
-      newAssetIds: [originalAssetId, displayAssetId],
-    };
+  // 失敗時に保存途中のアセットが残らないよう、展開・検証してから保存する
+  const saved: string[] = [];
+  const put = async (blob: Blob): Promise<string> => {
+    const id = newId('as');
+    await storage.saveAsset(id, blob);
+    saved.push(id);
+    return id;
+  };
+  try {
+    if (type === 'application/pdf') {
+      onStage?.('PDFを描画中…');
+      const r = await renderPdfPage(original, 1);
+      onStage?.('元ファイルを保存中…');
+      const originalAssetId = await put(original);
+      const displayAssetId = await put(r.png);
+      return {
+        meta: newUnderlay({ originalAssetId, displayAssetId, fileName, source: type, pxWidth: r.w, pxHeight: r.h, rasterScale: 1, pdfPage: 1, pdfPageCount: r.pages, paperMm: r.paperMm }),
+        newAssetIds: [originalAssetId, displayAssetId],
+      };
+    }
+    const hdr = await imageHeaderSize(original);
+    if (!hdr || !hdr.w || !hdr.h) throw new Error('画像の大きさを取得できませんでした（破損または未対応の形式）');
+    if (hdr.w * hdr.h > MAX_DECODE_PIXELS) throw new Error(`画像の画素数が大きすぎます（${hdr.w}×${hdr.h}px、上限は約${Math.round(MAX_DECODE_PIXELS / 1e6)}メガピクセル）。解像度を下げてから取り込んでください`);
+    onStage?.('画像を読み込み中…');
+    const img = await loadImage(original);
+    const W = img.naturalWidth;
+    const H = img.naturalHeight;
+    if (!W || !H) throw new Error('画像の大きさを取得できませんでした');
+    const fit = fitSize(W, H);
+    onStage?.('元ファイルを保存中…');
+    const originalAssetId = await put(original);
+    if (fit.k >= 1) {
+      // そのまま表示できる大きさ：表示用も元ファイルを共有
+      return { meta: newUnderlay({ originalAssetId, displayAssetId: originalAssetId, fileName, source: type, pxWidth: W, pxHeight: H, rasterScale: 1 }), newAssetIds: [originalAssetId] };
+    }
+    onStage?.('表示用に縮小中…');
+    const c = document.createElement('canvas');
+    c.width = fit.w;
+    c.height = fit.h;
+    const ctx = c.getContext('2d');
+    if (!ctx) throw new Error('Canvas を利用できません');
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, 0, 0, fit.w, fit.h);
+    const disp = await canvasToBlob(c, type, type === 'image/jpeg' ? 0.92 : undefined);
+    c.width = c.height = 0;
+    const displayAssetId = await put(disp);
+    return { meta: newUnderlay({ originalAssetId, displayAssetId, fileName, source: type, pxWidth: fit.w, pxHeight: fit.h, rasterScale: fit.k }), newAssetIds: [originalAssetId, displayAssetId] };
+  } catch (e) {
+    for (const id of saved) await storage.deleteAsset(id).catch(() => undefined);
+    throw e;
   }
-
-  onStage?.('画像を読み込み中…');
-  const img = await loadImage(original);
-  const W = img.naturalWidth;
-  const H = img.naturalHeight;
-  if (!W || !H) throw new Error('画像の大きさを取得できませんでした');
-  const fit = fitSize(W, H);
-  if (fit.k >= 1) {
-    // そのまま表示できる大きさ：表示用も元ファイルを共有
-    return { meta: newUnderlay({ originalAssetId, displayAssetId: originalAssetId, fileName, source: type, pxWidth: W, pxHeight: H, rasterScale: 1 }), newAssetIds: [originalAssetId] };
-  }
-  onStage?.('表示用に縮小中…');
-  const c = document.createElement('canvas');
-  c.width = fit.w;
-  c.height = fit.h;
-  const ctx = c.getContext('2d')!;
-  ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(img, 0, 0, fit.w, fit.h);
-  const disp = await canvasToBlob(c, type, type === 'image/jpeg' ? 0.92 : undefined);
-  c.width = c.height = 0;
-  const displayAssetId = newId('as');
-  await storage.saveAsset(displayAssetId, disp);
-  return { meta: newUnderlay({ originalAssetId, displayAssetId, fileName, source: type, pxWidth: fit.w, pxHeight: fit.h, rasterScale: fit.k }), newAssetIds: [originalAssetId, displayAssetId] };
 }
 
 /** PDF の別ページに切り替え（元ファイルから再描画） */

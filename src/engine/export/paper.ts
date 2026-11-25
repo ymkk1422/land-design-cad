@@ -162,6 +162,7 @@ export function buildExportSvg(doc: ProjectDoc, opt: ExportOptions): { svg: stri
   tb += `<text x="${MARGIN_MM + 2}" y="${f(tY + 19)}" font-size="2.5" font-family="${FONT}" fill="#14161a">${esc(noteText.slice(0, 220))}</text>`;
   const note2 = `注記：${opt.notes || doc.notes || '寸法は入力値に基づく計算値です。駐車台数は探索アルゴリズムによる配置案であり、法令・条例・現地条件の確認が必要です。'}`;
   tb += `<text x="${MARGIN_MM + 2}" y="${f(tY + 25)}" font-size="2.5" font-family="${FONT}" fill="#14161a">${esc(note2.slice(0, 200))}</text>`;
+  tb += `<text x="${MARGIN_MM + 2}" y="${f(tY + 31)}" font-size="2.3" font-family="${FONT}" fill="#6b6f76">印刷時は「実際のサイズ（100%）」を選んでください（「用紙に合わせる」では縮尺が変わります）。縮尺バーで確認できます。</text>`;
   tb += `<text x="${P.w - MARGIN_MM - 2}" y="${f(tY + 31)}" font-size="2.3" text-anchor="end" font-family="${FONT}" fill="#6b6f76">LAND DESIGN CAD</text></g>`;
 
   const clipId = 'drawclip';

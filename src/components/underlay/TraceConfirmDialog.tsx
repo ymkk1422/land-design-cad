@@ -31,8 +31,9 @@ export function TraceConfirmDialog(): JSX.Element | null {
   const preview = useMemo(() => {
     if (!open || !norm || values.some((v) => v === null || !(v! > 0))) return null;
     const land = landFromReadings(norm.pts.length, readings.map((r, i) => ({ ...r, value: values[i]! })), { ...doc!.land });
-    return { land, sol: solveLand(land) };
-  }, [open, norm, readings, values, doc]);
+    // 下絵上の頂点位置を初期形状のヒントにして、下絵に近い解を確実に候補へ含める
+    return { land, sol: solveLand(land, { hint: norm.pts.map((p) => pxToWorld(u!, p)) }) };
+  }, [open, norm, readings, values, doc, u]);
 
   if (!open || !u || !norm || !doc) return null;
   const n = norm.pts.length;

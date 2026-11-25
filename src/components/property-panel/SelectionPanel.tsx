@@ -137,7 +137,7 @@ export function SelectionPanel(): JSX.Element {
       {selKind === 'obstacle' && (
         <div className="mb-2 space-y-2">
           <Select label="種類" value={(one as Obstacle).kind} options={Object.entries(OBSTACLE_STYLE).map(([k, v]) => ({ value: k, label: v.name }))} onChange={(v) => upd({ kind: v } as Partial<R>)} />
-          <input className="h-10 w-full rounded border border-neutral-300 px-2 text-[16px]" placeholder="ラベル（任意）" value={(one as Obstacle).label ?? ''} onChange={(e) => upd({ label: e.target.value.slice(0, 30) } as Partial<R>)} />
+          <input className="h-10 w-full rounded border border-neutral-300 px-2 text-[16px]" placeholder="ラベル（任意）" value={(one as Obstacle).label ?? ''} onChange={(e) => commit('ラベルの変更', (d) => ({ ...d, [key]: (d[key] as R[]).map((o) => (o.id === one.id ? { ...o, label: e.target.value.slice(0, 30) } : o)) }), { coalesce: true })} />
         </div>
       )}
       {selKind === 'aisle' && (

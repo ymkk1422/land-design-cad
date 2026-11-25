@@ -1,7 +1,7 @@
 'use client';
 import type { JSX } from 'react';
 // アプリ本体：画面遷移（#home / #editor / #settings）、保存先初期化、自動保存
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useProject } from '@/stores/projectStore';
 import { Home } from '@/components/Home';
 import { Editor, type PanelTab } from '@/components/Editor';
@@ -10,6 +10,7 @@ import { NumericKeypad } from '@/components/keypad/NumericKeypad';
 import { TraceConfirmDialog } from '@/components/underlay/TraceConfirmDialog';
 import { pickStorage } from '@/services/storage/select';
 import { createProject } from '@/services/projectFactory';
+import { createAutosave } from '@/services/autosave';
 
 type View = 'home' | 'editor' | 'settings';
 const CUR_KEY = 'ldc:current';
@@ -82,44 +83,17 @@ export function App(): JSX.Element {
     };
   }, [setStorage, load]);
 
-  // 自動保存（デバウンス）＋定期的な版保存
-  const lastSnap = useRef(0);
+  // 自動保存（デバウンス・再試行・版保存）。ロジックは services/autosave.ts（単体テストあり）
   useEffect(() => {
     if (!storage) return;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    let saving = false;
-    const flush = async (snapshot = false): Promise<void> => {
-      const s = useProject.getState();
-      if (!s.doc || (s.saveState !== 'dirty' && !snapshot) || saving) return;
-      saving = true;
-      const d = s.doc;
-      s.setSaveState('saving');
-      try {
-        const snap = snapshot || Date.now() - lastSnap.current > 5 * 60 * 1000;
-        await storage.save(d, { snapshot: snap, label: snapshot ? '終了時の自動保存' : '自動保存' });
-        if (snap) lastSnap.current = Date.now();
-        if (useProject.getState().doc === d) useProject.getState().markSaved(new Date().toISOString());
-        else useProject.getState().setSaveState('dirty');
-      } catch (e) {
-        useProject.getState().setSaveState('error', (e as Error).message);
-      } finally {
-        saving = false;
-      }
-    };
-    const unsub = useProject.subscribe((s, prev) => {
-      if (s.doc !== prev.doc && s.saveState === 'dirty') {
-        if (timer) clearTimeout(timer);
-        timer = setTimeout(() => void flush(), 1500);
-      }
-    });
+    const ctl = createAutosave(storage, useProject);
     const onHide = (): void => {
-      if (document.visibilityState === 'hidden') void flush(true);
+      if (document.visibilityState === 'hidden') void ctl.flush(true);
     };
     document.addEventListener('visibilitychange', onHide);
     window.addEventListener('pagehide', onHide);
     return () => {
-      unsub();
-      if (timer) clearTimeout(timer);
+      ctl.dispose();
       document.removeEventListener('visibilitychange', onHide);
       window.removeEventListener('pagehide', onHide);
     };

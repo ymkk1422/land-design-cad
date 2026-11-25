@@ -123,3 +123,36 @@ describe('保存・再編集', () => {
     expect(recovered.name).toBe('版2');
   });
 });
+
+import { setPngDpi, readPngDpi, setJpegDpi, readJpegDpi } from '@/engine/export/dpi';
+import { imageHeaderSize, MAX_DECODE_PIXELS } from '@/services/storage/assets';
+import { readFileSync } from 'node:fs';
+describe('画像出力の解像度・取込前の画素数確認', () => {
+  const png = new Uint8Array(readFileSync('tests/e2e/fixtures/survey.png'));
+  const jpg = new Uint8Array(readFileSync('tests/e2e/fixtures/survey-rotated.jpg'));
+  it('PNG に pHYs（200dpi）を書き込み、画像として壊さない', () => {
+    const out = setPngDpi(png, 200);
+    expect(readPngDpi(out)).toBeCloseTo(200, 0);
+    expect(readPngDpi(setPngDpi(out, 300))).toBeCloseTo(300, 0); // 置換（重複しない）
+    expect(setPngDpi(out, 300).length).toBe(out.length);
+    expect(Array.from(out.subarray(out.length - 8, out.length - 4)).map((c) => String.fromCharCode(c)).join('')).toBe('IEND');
+  });
+  it('JPEG の JFIF に 200dpi を設定する', () => {
+    const out = setJpegDpi(jpg, 200);
+    expect(readJpegDpi(out)).toBe(200);
+    const bare = new Uint8Array([0xff, 0xd8, 0xff, 0xdb, 0x00, 0x02, 0xff, 0xd9]);
+    expect(readJpegDpi(setJpegDpi(bare, 150))).toBe(150);
+  });
+  it('画像のヘッダから画素数を読み、巨大画像を展開前に拒否できる', async () => {
+    const hp = await imageHeaderSize(new Blob([png]));
+    const hj = await imageHeaderSize(new Blob([jpg]));
+    expect(hp).toEqual({ w: 2000, h: 1500 });
+    expect(hj).toEqual({ w: 2000, h: 1500 });
+    const bomb = png.slice(0, 33);
+    new DataView(bomb.buffer).setUint32(16, 60000);
+    new DataView(bomb.buffer).setUint32(20, 60000);
+    const hb = await imageHeaderSize(new Blob([bomb]));
+    expect(hb!.w * hb!.h).toBeGreaterThan(MAX_DECODE_PIXELS);
+    expect(await imageHeaderSize(new Blob([new Uint8Array([1, 2, 3])]))).toBeNull();
+  });
+});

@@ -1,6 +1,6 @@
 // データ保存層：端末内（localStorage）／Claude Artifact DB／Supabase を同一インターフェースで扱う
 import type { ProjectDoc, ProjectSummary } from '@/types';
-import { migrateProject } from '@/services/projectFactory';
+import { migrateProject, storable } from '@/services/projectFactory';
 import { polygonArea } from '@/engine/geometry/polygon';
 import { isDrawable } from '@/engine/constraints/solver';
 import { IdbAssetStore } from './assets';
@@ -150,7 +150,8 @@ export class LocalAdapter implements StorageAdapter {
       return [];
     }
   }
-  async save(doc: ProjectDoc, opts: { snapshot?: boolean; label?: string } = {}): Promise<void> {
+  async save(docIn: ProjectDoc, opts: { snapshot?: boolean; label?: string } = {}): Promise<void> {
+    const doc = storable(docIn, false);
     const json = JSON.stringify(doc);
     this.set(kDoc(doc.id), json);
     const idx = (await this.list()).filter((p) => p.id !== doc.id);

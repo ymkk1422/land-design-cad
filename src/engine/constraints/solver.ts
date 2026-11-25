@@ -8,6 +8,7 @@ import {
   deg,
   dist,
   interiorAngleAt,
+  isConvex,
   isSelfIntersecting,
   rad,
   signedArea,
@@ -33,6 +34,16 @@ function wrapPi(a: number): number {
 }
 
 export interface SolveOptions {
+  /**
+   * 形状のヒント（前回選択していた形状、下絵からトレースした形状など）。
+   * 最初の探索初期値に使い、複数解のときはヒントに最も近い形状を候補の先頭にする。
+   * 寸法を少し直しただけで別の解（三角形の折り返し）へ形状が飛ぶのを防ぐ。
+   */
+  hint?: Vec2[] | null;
+  /** 表示する候補の上限 */
+  maxCandidates?: number;
+  /** 探索の時間予算（ms）。少なくとも1つ解が得られた後に適用。既定 700ms（画面が固まらないように） */
+  timeBudgetMs?: number;
   starts?: number;
   seed?: number;
   maxIterations?: number;
@@ -180,14 +191,39 @@ function evaluate(rows: Row[], X: number[], cols: number): { r: number[]; J: Mat
 
 const cost = (r: number[]): number => r.reduce((s, v) => s + v * v, 0);
 
+/** 残差と疎なヤコビ行列（各行の非ゼロは最大6個）から正規方程式 JᵀJ・Jᵀr を直接組み立てる */
+function sparseNormal(rows: Row[], X: number[], cols: number): { A: Matrix; g: number[]; c: number } {
+  const A: Matrix = Array.from({ length: cols }, () => new Array<number>(cols).fill(0));
+  const g = new Array<number>(cols).fill(0);
+  let c = 0;
+  for (const row of rows) {
+    const e = row.eval(X);
+    c += e.r * e.r;
+    const gr = e.grad;
+    for (let a = 0; a < gr.length; a++) {
+      const [i, vi] = gr[a];
+      g[i] += vi * e.r;
+      for (let b = 0; b < gr.length; b++) A[i][gr[b][0]] += vi * gr[b][1];
+    }
+  }
+  return { A, g, c };
+}
+
+function costOnly(rows: Row[], X: number[]): number {
+  let c = 0;
+  for (const row of rows) {
+    const r = row.eval(X).r;
+    c += r * r;
+  }
+  return c;
+}
+
 function levenbergMarquardt(rows: Row[], X0: number[], maxIter: number): { X: number[]; cost: number } {
   const cols = X0.length;
   let X = X0.slice();
-  let { r, J } = evaluate(rows, X, cols);
-  let c = cost(r);
+  let { A, g, c } = sparseNormal(rows, X, cols);
   let lambda = 1e-3;
   for (let it = 0; it < maxIter; it++) {
-    const { A, g } = normalEquations(J, r, cols);
     let improved = false;
     for (let tries = 0; tries < 12; tries++) {
       const M = A.map((row, i) => row.map((v, j) => (i === j ? v + lambda * (v + 1e-9) : v)));
@@ -197,15 +233,12 @@ function levenbergMarquardt(rows: Row[], X0: number[], maxIter: number): { X: nu
         continue;
       }
       const Xn = X.map((v, i) => v + step[i]);
-      const ev = evaluate(rows, Xn, cols);
-      const cn = cost(ev.r);
+      const cn = costOnly(rows, Xn);
       if (cn < c) {
-        const stepNorm = Math.sqrt(step.reduce((s, v) => s + v * v, 0));
-        X = Xn;
-        r = ev.r;
-        J = ev.J;
+        const stepNorm = Math.sqrt(step.reduce((s2, v) => s2 + v * v, 0));
         const rel = (c - cn) / Math.max(c, 1e-300);
-        c = cn;
+        X = Xn;
+        ({ A, g, c } = sparseNormal(rows, X, cols));
         lambda = Math.max(lambda / 3, 1e-12);
         improved = true;
         if (stepNorm < 1e-12 || c < 1e-26 || rel < 1e-15) return { X, cost: c };
@@ -362,10 +395,20 @@ export function solveLand(land: LandInput, opts: SolveOptions = {}): SolveResult
   const rand = mulberry32(opts.seed ?? 12345);
   const maxIter = opts.maxIterations ?? 200;
 
+  const hint = opts.hint && opts.hint.length === n && opts.hint.every((p) => Number.isFinite(p.x) && Number.isFinite(p.y)) ? opts.hint : null;
   const raw: { X: number[]; cost: number }[] = [];
+  // 早期終了：新しい厳密解（または最良解の改善）が16回続けて見つからなければ打ち切る
+  const exactTolEarly = 1e-7 * lengthScale;
+  const foundSig: number[][] = [];
+  let bestCost = Infinity;
+  let lastProgress = 0;
+  const tStart = Date.now();
+  const budget = opts.timeBudgetMs ?? 700;
+  let budgetHit = false;
   for (let s = 0; s < starts; s++) {
     let X0: number[];
-    if (s === 0) X0 = traverseInitial(land, () => null, 0, meanSide);
+    if (s === 0 && hint) X0 = hint.flatMap((p) => [p.x, p.y]);
+    else if (s === 0 || (s === 1 && hint)) X0 = traverseInitial(land, () => null, 0, meanSide);
     else if (s === 1) {
       const R = meanSide / (2 * Math.sin(Math.PI / n));
       X0 = Array.from({ length: n }, (_, i) => [R * Math.cos((TWO_PI * i) / n - Math.PI / 2), R * Math.sin((TWO_PI * i) / n - Math.PI / 2)]).flat();
@@ -374,8 +417,23 @@ export function solveLand(land: LandInput, opts: SolveOptions = {}): SolveResult
     } else {
       X0 = traverseInitial(land, rand, 40 + (s % 3) * 25, meanSide);
     }
-    X0 = placeCoords(X0, land);
-    raw.push(levenbergMarquardt(rows, X0, maxIter));
+    if (!(s === 0 && hint)) X0 = placeCoords(X0, land);
+    const r = levenbergMarquardt(rows, X0, maxIter);
+    raw.push(r);
+    const rms = Math.sqrt(r.cost / Math.max(1, rows.length));
+    if (rms <= exactTolEarly * 10) {
+      const sig = pairwiseSignature(normalizeOrientation(toPoints(r.X), land));
+      if (!foundSig.some((f) => f.every((v, k) => Math.abs(v - sig[k]) < 1e-5 * lengthScale))) {
+        foundSig.push(sig);
+        lastProgress = s;
+      }
+    } else if (r.cost < bestCost * (1 - 1e-6)) lastProgress = s;
+    bestCost = Math.min(bestCost, r.cost);
+    if (s >= 20 && s - lastProgress >= 16) break;
+    if (s >= 8 && foundSig.length > 0 && Date.now() - tStart > budget) {
+      budgetHit = true;
+      break;
+    }
   }
 
   raw.sort((a, b) => a.cost - b.cost);
@@ -384,8 +442,16 @@ export function solveLand(land: LandInput, opts: SolveOptions = {}): SolveResult
   const bestRms = Math.sqrt(best.cost / Math.max(1, realRows));
   const exactTol = 1e-7 * lengthScale;
 
-  const { J } = evaluate(rows, best.X, cols);
-  const rank = numericRank(J, cols, 1e-10);
+  // 独立な寸法の数（ランク）の判定。
+  // 寸法を満たす解が得られた場合はその点で判定する（その形状が動かせるか）。
+  // 満たす解が無い（矛盾）場合、最小二乗解は三角形が潰れた退化形になりやすく、その点のランクは
+  // 本来より低く出るため「不足」と誤判定してしまう。そこで一般の位置（複数の試行点）での最大ランクで判定する。
+  const fitsSomewhere = bestRms <= Math.max(exactTol * 10, land.tolerance);
+  let rank = numericRank(evaluate(rows, best.X, cols).J, cols, 1e-10);
+  if (!fitsSomewhere && rank < cols) {
+    for (const r of raw.slice(1, 6)) rank = Math.max(rank, numericRank(evaluate(rows, r.X, cols).J, cols, 1e-10));
+    for (let k = 0; k < 4 && rank < cols; k++) rank = Math.max(rank, numericRank(evaluate(rows, placeCoords(traverseInitial(land, rand, 30, meanSide), land), cols).J, cols, 1e-10));
+  }
   if (rank < cols) {
     const missing = cols - rank;
     messages.unshift(
@@ -424,6 +490,18 @@ export function solveLand(land: LandInput, opts: SolveOptions = {}): SolveResult
       uniq.push(c);
     }
     const simple = uniq.filter((c) => !c.selfIntersecting);
+    // 並び順：ヒントがあれば最も近い形状を先頭、なければ凸形状→面積の大きい順（一般的な土地を先に）
+    if (hint) {
+      const hs = pairwiseSignature(hint);
+      const d = (c: SolutionCandidate): number => pairwiseSignature(c.points).reduce((a, v, k) => a + Math.abs(v - hs[k]), 0);
+      simple.sort((a, b) => d(a) - d(b));
+    } else {
+      simple.sort((a, b) => Number(isConvex(b.points)) - Number(isConvex(a.points)) || Math.abs(signedArea(b.points)) - Math.abs(signedArea(a.points)));
+    }
+    const maxC = opts.maxCandidates ?? 12;
+    const total = simple.length;
+    if (simple.length > maxC) simple.length = maxC;
+    if (budgetHit && simple.length > 1) messages.push('候補が多いため探索を時間内で打ち切りました。他にも形状の候補が存在する可能性があります。');
     if (!simple.length) {
       status = 'inconsistent';
       candidates = uniq.slice(0, 1);
@@ -443,7 +521,11 @@ export function solveLand(land: LandInput, opts: SolveOptions = {}): SolveResult
       candidates = simple;
       status = simple.length > 1 ? 'multiple' : 'exact';
       if (simple.length > 1) {
-        messages.unshift(`寸法を満たす形状が${simple.length}通りあります。候補から正しい形状を選ぶか、対角線・角度を追加して一意にしてください。`);
+        messages.unshift(
+          total > simple.length
+            ? `寸法を満たす形状が${total}通り以上見つかりました（表示は${hint ? '現在の形状に近い' : '凸形状・面積の大きい'}順に${simple.length}件）。角度・座標を追加して一意にしてください。`
+            : `寸法を満たす形状が${simple.length}通りあります。候補から正しい形状を選ぶか、対角線・角度を追加して一意にしてください。`,
+        );
         if (simple.some((c) => c.mirrorOf !== undefined)) messages.push('候補の中に鏡像（左右反転）形状が含まれます。');
       }
       if (uniq.length > simple.length) messages.push(`自己交差する解${uniq.length - simple.length}件は除外しました。`);

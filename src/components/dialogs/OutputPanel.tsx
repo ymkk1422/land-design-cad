@@ -94,7 +94,7 @@ export function OutputPanel(): JSX.Element {
           {ul && <Toggle label="下絵（取り込んだ測量図）を重ねて出力" checked={withUnderlay} onChange={setWithUnderlay} testId="export-underlay" />}
           <label className="block text-[13px] text-neutral-600">
             注記
-            <textarea className="mt-1 w-full rounded border border-neutral-300 p-2 text-[16px]" rows={2} value={doc.notes} maxLength={200} onChange={(e) => commit('注記の変更', (x) => ({ ...x, notes: e.target.value }))} placeholder="PDFの注記欄に表示されます" />
+            <textarea className="mt-1 w-full rounded border border-neutral-300 p-2 text-[16px]" rows={2} value={doc.notes} maxLength={200} onChange={(e) => commit('注記の変更', (x) => ({ ...x, notes: e.target.value }), { coalesce: true })} placeholder="PDFの注記欄に表示されます" />
           </label>
           <div className="overflow-hidden rounded border border-neutral-300 bg-white" aria-label="出力プレビュー" data-testid="export-preview" dangerouslySetInnerHTML={{ __html: preview.svg.replace(/width="[\d.]+mm" height="[\d.]+mm"/, 'width="100%" height="auto"') }} />
           {preview.warnings.map((w, i) => (

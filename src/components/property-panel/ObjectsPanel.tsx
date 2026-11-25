@@ -23,7 +23,7 @@ export function ObjectsPanel(): JSX.Element {
         {doc.roads.map((r) => (
           <div key={r.id} className="mb-2 space-y-1 rounded-md border border-neutral-200 p-2">
             <div className="grid grid-cols-[1fr_auto] gap-1">
-              <input className="h-10 rounded border border-neutral-300 px-2 text-[16px]" value={r.name} onChange={(e) => commit('道路名', (d) => ({ ...d, roads: d.roads.map((x) => (x.id === r.id ? { ...x, name: e.target.value.slice(0, 30) } : x)) }))} aria-label="道路名" />
+              <input className="h-10 rounded border border-neutral-300 px-2 text-[16px]" value={r.name} onChange={(e) => commit('道路名', (d) => ({ ...d, roads: d.roads.map((x) => (x.id === r.id ? { ...x, name: e.target.value.slice(0, 30) } : x)) }), { coalesce: true })} aria-label="道路名" />
               <Btn variant="ghost" title="道路を削除" onClick={() => commit('道路の削除', (d) => ({ ...d, roads: d.roads.filter((x) => x.id !== r.id) }))}>
                 ✕
               </Btn>

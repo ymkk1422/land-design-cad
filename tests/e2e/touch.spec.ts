@@ -233,6 +233,17 @@ test('選択した枠の回転（ハンドル・ボタン）と数値入力の�
   await expect(page.getByTestId('kp-display')).not.toContainText('3');
   await page.getByTestId('kp-cancel').tap();
   await expect(x).toHaveValue('3');
+  // 外付けキーボードの Backspace/Delete はテンキーの入力だけに効き、選択中の枠を削除しない
+  const count = await page.getByTestId('header-count').textContent();
+  await x.tap();
+  await expect(page.getByTestId('keypad')).toBeVisible();
+  await page.keyboard.press('Backspace');
+  await page.keyboard.press('Delete');
+  await page.keyboard.press('Control+z');
+  await expect(page.getByTestId('header-count')).toHaveText(count!);
+  await page.getByTestId('kp-cancel').tap();
+  await expect(page.getByTestId('header-count')).toHaveText(count!);
+  await expect(x).toHaveValue('3');
 });
 
 test('度分秒の角度入力（テンキー）と土地寸法の入力', async ({ page }) => {

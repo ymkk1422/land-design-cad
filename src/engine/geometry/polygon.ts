@@ -23,12 +23,16 @@ export function rotate(p: Vec2, angleRad: number, origin: Vec2 = { x: 0, y: 0 })
 
 /** 符号付き面積（シューレース公式）。反時計回りで正 */
 export function signedArea(pts: Vec2[]): number {
-  let s = 0;
+  // 平面直角座標系の大きな座標値でも桁落ちしないよう、第1頂点を原点に平行移動して計算
   const n = pts.length;
+  if (n < 3) return 0;
+  const ox = pts[0].x;
+  const oy = pts[0].y;
+  let s = 0;
   for (let i = 0; i < n; i++) {
     const a = pts[i];
     const b = pts[(i + 1) % n];
-    s += a.x * b.y - b.x * a.y;
+    s += (a.x - ox) * (b.y - oy) - (b.x - ox) * (a.y - oy);
   }
   return s / 2;
 }
@@ -249,15 +253,17 @@ export function centroid(pts: Vec2[]): Vec2 {
     const s = pts.reduce((acc, p) => add(acc, p), { x: 0, y: 0 });
     return scale(s, 1 / pts.length);
   }
+  const ox = pts[0].x;
+  const oy = pts[0].y;
   let cx = 0, cy = 0;
   for (let i = 0; i < pts.length; i++) {
-    const p = pts[i];
-    const q = pts[(i + 1) % pts.length];
+    const p = { x: pts[i].x - ox, y: pts[i].y - oy };
+    const q = { x: pts[(i + 1) % pts.length].x - ox, y: pts[(i + 1) % pts.length].y - oy };
     const f = p.x * q.y - q.x * p.y;
     cx += (p.x + q.x) * f;
     cy += (p.y + q.y) * f;
   }
-  return { x: cx / (6 * a), y: cy / (6 * a) };
+  return { x: ox + cx / (6 * a), y: oy + cy / (6 * a) };
 }
 
 export function bbox(pts: Vec2[]): { minX: number; minY: number; maxX: number; maxY: number } {

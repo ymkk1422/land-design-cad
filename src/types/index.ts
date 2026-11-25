@@ -114,6 +114,8 @@ export interface Aisle extends RectShape {
   kind: AisleKind;
   /** 一方通行の進行方向（矩形のローカル +X 方向 = 1, 逆 = -1） */
   direction: 1 | -1;
+  /** この通路に面する枠の駐車角度（自動配置で記録。手動の通路は枠から推定） */
+  stallAngle?: number;
 }
 
 export type ObstacleKind =
@@ -324,6 +326,8 @@ export interface ProjectDoc {
   notes: string;
   activePlanName?: string;
   underlay?: UnderlayMeta | null;
+  /** 選択中の形状の座標（保存用）。複数解のとき、再読込しても同じ形状を復元するため */
+  shapeHint?: Vec2[] | null;
   /** このプロジェクトが使用した（したことのある）アセット ID。プロジェクト削除時に一括削除 */
   assetIds?: string[];
   /** 編集履歴（操作ログ。全状態はバージョン保存で保持） */

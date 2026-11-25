@@ -96,7 +96,7 @@ export function Editor({ onBack, initialTab = 'land' }: { onBack: () => void; in
   }, [layout, maximized]);
 
   const site = currentSite(doc);
-  const report = useMemo(() => (site ? checkInterference(site, doc.stalls, doc.obstacles, doc.aisles, doc.parking, 90, doc.entrances) : null), [site, doc.stalls, doc.obstacles, doc.aisles, doc.parking, doc.entrances]);
+  const report = useMemo(() => (site ? checkInterference(site, doc.stalls, doc.obstacles, doc.aisles, doc.parking, undefined, doc.entrances) : null), [site, doc.stalls, doc.obstacles, doc.aisles, doc.parking, doc.entrances]);
   const problems = useMemo(() => {
     const s = new Set<string>();
     if (!report) return s;
@@ -338,7 +338,7 @@ function ProjectName({ compact }: { compact?: boolean }): JSX.Element {
       value={doc.name}
       maxLength={80}
       enterKeyHint="done"
-      onChange={(e) => commit('名称変更', (d) => ({ ...d, name: e.target.value || '無題' }))}
+      onChange={(e) => commit('名称変更', (d) => ({ ...d, name: e.target.value || '無題' }), { coalesce: true })}
       onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
       aria-label="プロジェクト名"
       data-testid="project-name"

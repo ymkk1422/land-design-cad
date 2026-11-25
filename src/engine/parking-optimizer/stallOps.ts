@@ -3,7 +3,18 @@ import type { Stall, Vec2 } from '@/types';
 import { rad, rotate } from '@/engine/geometry/polygon';
 
 let seq = 0;
-export const newId = (prefix: string): string => `${prefix}${Date.now().toString(36)}${(seq++).toString(36)}${Math.random().toString(36).slice(2, 5)}`;
+const ALPHA = '0123456789abcdefghijklmnopqrstuvwxyz';
+/** 衝突しにくいID：時刻＋連番＋暗号学的乱数（複数端末で同時に作成しても重複しない） */
+function randomPart(n: number): string {
+  const c = globalThis.crypto;
+  const buf = new Uint8Array(n);
+  if (c?.getRandomValues) c.getRandomValues(buf);
+  else for (let i = 0; i < n; i++) buf[i] = Math.floor(Math.random() * 256);
+  let out = '';
+  for (const b of buf) out += ALPHA[b % 36];
+  return out;
+}
+export const newId = (prefix: string): string => `${prefix}${Date.now().toString(36)}${(seq++).toString(36)}${randomPart(8)}`;
 
 export const snapValue = (v: number, step: number): number => (step > 0 ? Math.round(v / step) * step : v);
 

@@ -179,7 +179,8 @@ export function DrawingCanvas({ problems }: { problems: Set<string> }): JSX.Elem
     };
   }, [fit]);
 
-  const textUnit = 1 / view.s;
+  // 文字サイズの基準。ピンチ中に毎フレーム図面モデルを作り直さないよう、約12%刻みに量子化する
+  const textUnit = Math.exp(Math.round(Math.log(1 / view.s) / 0.12) * 0.12);
   const highlight = useMemo(() => new Set(st.selIds), [st.selIds]);
   const seeThrough = !!(doc.underlay && doc.underlay.visible);
   const prims = useMemo(() => buildModel(doc, { mode: doc.mode, textUnit, sitePoints: site, highlight, problems, seeThrough }), [doc, textUnit, site, highlight, problems, seeThrough]);
@@ -321,7 +322,9 @@ export function DrawingCanvas({ problems }: { problems: Set<string> }): JSX.Elem
         const edge = Number(id);
         st.commit('頂点の追加', (d) => {
           const r = insertVertexLand(d.land, site, edge);
-          return { ...d, land: r.land, solution: solveLand(r.land), selectedCandidate: 0, roads: remapEdges(d.roads, 'insert', edge, site.length), entrances: remapEdges(d.entrances, 'insert', edge, site.length) };
+          const a = site[edge], b = site[(edge + 1) % site.length];
+          const hint = [...site.slice(0, edge + 1), { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, ...site.slice(edge + 1)];
+          return { ...d, land: r.land, solution: solveLand(r.land, { hint }), selectedCandidate: 0, shapeHint: hint, roads: remapEdges(d.roads, 'insert', edge, site.length), entrances: remapEdges(d.entrances, 'insert', edge, site.length) };
         });
         return;
       }
@@ -569,7 +572,12 @@ export function DrawingCanvas({ problems }: { problems: Set<string> }): JSX.Elem
     }
     if (g?.type === 'vertex') {
       if (g.moved) {
-        st.live((d) => ({ ...d, solution: solveLand(d.land) }));
+        // 確定時に厳密解を計算。ドラッグ中の形状をヒントにして、鏡像など別の解へ跳ばないようにする
+        st.live((d) => {
+          const hint = currentSite(d);
+          const solution = solveLand(d.land, hint ? { hint } : {});
+          return { ...d, solution, selectedCandidate: 0, shapeHint: solution.candidates[0]?.points ?? d.shapeHint ?? null };
+        });
         st.endLive();
       } else st.endLive();
     }
@@ -615,7 +623,9 @@ export function DrawingCanvas({ problems }: { problems: Set<string> }): JSX.Elem
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
       const tag = (e.target as HTMLElement).tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if (e.defaultPrevented || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (e.target as HTMLElement).isContentEditable) return;
+      // ダイアログ（テンキー・確認画面など）表示中は図面のショートカットを無効にする
+      if (document.querySelector('[role="dialog"]')) return;
       const s = useProject.getState();
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
         e.preventDefault();
@@ -768,5 +778,6 @@ export function deleteSelectedVertex(doc: ProjectDoc, idx: number): Partial<Proj
   if (!site) return null;
   const r = deleteVertexLand(doc.land, site, idx);
   if (!r) return null;
-  return { land: r.land, solution: solveLand(r.land), selectedCandidate: 0, roads: remapEdges(doc.roads, 'delete', idx, site.length), entrances: remapEdges(doc.entrances, 'delete', idx, site.length) };
+  const hint = site.filter((_, i) => i !== idx);
+  return { land: r.land, solution: solveLand(r.land, { hint }), selectedCandidate: 0, shapeHint: hint, roads: remapEdges(doc.roads, 'delete', idx, site.length), entrances: remapEdges(doc.entrances, 'delete', idx, site.length) };
 }

@@ -1,7 +1,7 @@
 // 図面モデル：実寸データ → 描画プリミティブ（画面・PDF・PNG で共通）
 // 座標は「表示空間」(X=実寸x, Y=−実寸y, 単位m)。文字サイズは textUnit（1表示単位あたりのm）で指定し、
 // 画面では px、出力では mm 基準で一定の大きさになる。
-import type { DrawingMode, ProjectDoc, Vec2 } from '@/types';
+import type { ConstraintResidual, DrawingMode, LandFocus, ProjectDoc, SitePreview, Vec2 } from '@/types';
 import {
   bbox,
   centroid,
@@ -32,6 +32,10 @@ export interface ModelOptions {
   lineUnit?: number;
   /** 下絵を表示中：敷地・道路の塗りを透明にして下絵を透かす */
   seeThrough?: boolean;
+  /** 形状が確定していない「仮の形」（sitePoints はその頂点）。合わない寸法を赤、自動で決めた寸法を灰色で示す */
+  preview?: SitePreview | null;
+  /** 入力中の案内（画面のみ）：始点Aと回る向き、入力中の辺などの強調 */
+  guide?: { focus: LandFocus | null } | null;
 }
 
 const flip = (p: Vec2): Vec2 => ({ x: p.x, y: -p.y });
@@ -130,7 +134,10 @@ export function buildModel(doc: ProjectDoc, o: ModelOptions): Prim[] {
     }
 
     // 敷地
-    prims.push({ t: 'poly', pts: sp, fill: o.seeThrough ? 'none' : cad ? '#ffffff' : '#f3f6f4', stroke: '#14161a', sw: lw * (cad ? 1.6 : 2.2), layer: 'site', id: 'site' });
+    if (o.preview) {
+      // 仮の形：破線の輪郭（確定した図面と見分けられるように）
+      prims.push({ t: 'poly', pts: sp, fill: o.seeThrough ? 'none' : '#fff8ec', stroke: '#b45309', sw: lw * 1.8, dash: [lw * 7, lw * 4], layer: 'site', id: 'site' });
+    } else prims.push({ t: 'poly', pts: sp, fill: o.seeThrough ? 'none' : cad ? '#ffffff' : '#f3f6f4', stroke: '#14161a', sw: lw * (cad ? 1.6 : 2.2), layer: 'site', id: 'site' });
 
     // 通路
     if (d.showAisles || !cad) {
@@ -269,10 +276,17 @@ export function buildModel(doc: ProjectDoc, o: ModelOptions): Prim[] {
     // ---- 寸法・角度・頂点（精密CAD中心）----
     const n = site.length;
     const cen = centroid(site);
+    const pv = o.preview ?? null;
+    const tolM = Math.max(doc.land.tolerance, 0.0005);
+    const resOf = (kind: ConstraintResidual['kind'], label: string): ConstraintResidual | undefined => pv?.residuals.find((r) => r.kind === kind && r.label === label);
+    const bad = (r: ConstraintResidual | undefined): boolean => !!r && (r.kind === 'angle' ? Math.abs(r.error) > 0.01 : Math.abs(r.error) > tolM);
+    const RED = '#c8102e';
+    const AUTO = '#6b6f76';
+    const GUIDE = '#1d4ed8'; // 始点・回る向きの案内（出入口の赤と区別する）
     const bb = bbox(site);
     const ext = Math.max(bb.maxX - bb.minX, bb.maxY - bb.minY);
     const dimSize = 11 * u;
-    if (d.showDimensions) {
+    if (d.showDimensions || pv) {
       site.forEach((a, i) => {
         const b = site[(i + 1) % n];
         const L = dist(a, b);
@@ -295,7 +309,12 @@ export function buildModel(doc: ProjectDoc, o: ModelOptions): Prim[] {
         const mid = { x: (a2.x + b2.x) / 2 + out.x * dimSize * 0.55, y: (a2.y + b2.y) / 2 + out.y * dimSize * 0.55 };
         const ang = (-Math.atan2(t.y, t.x) * 180) / Math.PI;
         const rot = ang > 90 || ang < -90 ? ang + 180 : ang;
-        const label = `${vertexName(i)}${vertexName((i + 1) % n)} ${fmt(L)}`;
+        const name = `${vertexName(i)}${vertexName((i + 1) % n)}`;
+        const sr = pv ? resOf('side', name) : undefined;
+        const isBad = bad(sr);
+        const isAuto = !!pv && pv.autoSides.includes(i);
+        const label = isBad ? `${name} 図${fmt(L)}／入力${fmt(sr!.target)}` : isAuto ? `${name} ${fmt(L)}（自動）` : `${name} ${fmt(L)}`;
+        if (isBad) prims.push({ t: 'line', a: flip(a), b: flip(b), stroke: RED, sw: lw * 3.2, layer: 'mismatch' });
         // 他の文字と重なる場合は外側へずらす
         let fp = flip(mid);
         for (let k = 0; k < 5; k++) {
@@ -304,40 +323,86 @@ export function buildModel(doc: ProjectDoc, o: ModelOptions): Prim[] {
           fp = flip({ x: mid.x + out.x * dimSize * 1.3 * (k + 1), y: mid.y + out.y * dimSize * 1.3 * (k + 1) });
         }
         occupied.push(textBox(fp, label, dimSize, 'middle'));
-        prims.push({ t: 'text', p: fp, text: label, size: dimSize, fill: '#0b5d63', anchor: 'middle', rot, halo: true, weight: 600, layer: 'dim' });
+        prims.push({ t: 'text', p: fp, text: label, size: dimSize, fill: isBad ? RED : isAuto ? AUTO : '#0b5d63', anchor: 'middle', rot, halo: true, weight: isBad ? 700 : 600, layer: 'dim' });
       });
     }
-    if (cad && d.showDiagonals) {
+    if ((cad && d.showDiagonals) || pv) {
       for (const dg of doc.land.diagonals) {
         if (dg.a >= n || dg.b >= n) continue;
         const a = site[dg.a];
         const b = site[dg.b];
-        prims.push({ t: 'line', a: flip(a), b: flip(b), stroke: '#7a5c12', sw: lw * 0.7, dash: [lw * 5, lw * 3], layer: 'diag' });
+        const name = `${vertexName(dg.a)}${vertexName(dg.b)}`;
+        const r = pv ? resOf('diagonal', name) : undefined;
+        const isBad = bad(r);
+        const col = isBad ? RED : '#7a5c12';
+        prims.push({ t: 'line', a: flip(a), b: flip(b), stroke: col, sw: lw * (isBad ? 2 : 0.7), dash: [lw * 5, lw * 3], layer: 'diag' });
         const L = dist(a, b);
+        if (L < 1e-9) continue;
         const t = { x: (b.x - a.x) / L, y: (b.y - a.y) / L };
         const ang = (-Math.atan2(t.y, t.x) * 180) / Math.PI;
         const rot = ang > 90 || ang < -90 ? ang + 180 : ang;
-        placeText(flip({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }), flip(t), `${vertexName(dg.a)}${vertexName(dg.b)} ${fmt(L)}`, dimSize * 0.95, 'diag', '#7a5c12', rot);
+        placeText(flip({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }), flip(t), isBad ? `${name} 図${fmt(L)}／入力${fmt(r!.target)}` : `${name} ${fmt(L)}`, dimSize * 0.95, 'diag', col, rot);
       }
     }
-    if (cad && d.showAngles) {
+    if ((cad && d.showAngles) || pv) {
       const angs = interiorAngles(site);
       site.forEach((p, i) => {
         const dir = { x: cen.x - p.x, y: cen.y - p.y };
         const l = Math.hypot(dir.x, dir.y) || 1;
         const q = { x: p.x + (dir.x / l) * dimSize * 2.6, y: p.y + (dir.y / l) * dimSize * 2.6 };
-        placeText(flip(q), flip({ x: dir.x / l, y: dir.y / l }), formatDMS(angs[i]), dimSize * 0.85, 'angle', '#5a4a72');
+        const r = pv ? resOf('angle', vertexName(i)) : undefined;
+        const isBad = bad(r);
+        const isAuto = !!pv && pv.autoAngles.includes(i);
+        const text = isBad ? `図${formatDMS(angs[i])}／入力${formatDMS(r!.target)}` : isAuto ? `${formatDMS(angs[i])}（自動）` : formatDMS(angs[i]);
+        placeText(flip(q), flip({ x: dir.x / l, y: dir.y / l }), text, dimSize * 0.85, 'angle', isBad ? RED : isAuto ? AUTO : '#5a4a72');
       });
     }
-    if (d.showVertexNames || cad) {
+    if (d.showVertexNames || cad || pv || o.guide) {
       site.forEach((p, i) => {
         const dir = { x: p.x - cen.x, y: p.y - cen.y };
         const l = Math.hypot(dir.x, dir.y) || 1;
         const q = { x: p.x + (dir.x / l) * dimSize * 1.3, y: p.y + (dir.y / l) * dimSize * 1.3 };
         prims.push({ t: 'circle', c: flip(p), r: 2.2 * u, fill: '#14161a', stroke: '#14161a', sw: 0, layer: 'vertex' });
-        const label = d.showCoords && cad ? `${vertexName(i)} (${p.x.toFixed(d.decimals)}, ${p.y.toFixed(d.decimals)})` : vertexName(i);
-        placeText(flip(q), flip({ x: dir.x / l, y: dir.y / l }), label, dimSize * 1.05, 'vertex', '#14161a');
+        const base = i === 0 && o.guide ? 'A（始点）' : vertexName(i);
+        const label = d.showCoords && cad ? `${base} (${p.x.toFixed(d.decimals)}, ${p.y.toFixed(d.decimals)})` : base;
+        placeText(flip(q), flip({ x: dir.x / l, y: dir.y / l }), label, dimSize * (i === 0 && o.guide ? 1.2 : 1.05), 'vertex', i === 0 && o.guide ? GUIDE : '#14161a');
       });
+    }
+    if (o.guide) {
+      // 始点Aと回る向き（A→B→C…）。各辺の中央に進行方向の矢印、辺ABは赤で強調
+      const arrow = (a: Vec2, b: Vec2, at: number, size: number, fill: string): void => {
+        const L = dist(a, b);
+        if (L < 1e-9) return;
+        const t = { x: (b.x - a.x) / L, y: (b.y - a.y) / L };
+        const nrm = { x: -t.y, y: t.x };
+        const c = { x: a.x + t.x * L * at, y: a.y + t.y * L * at };
+        const tip = { x: c.x + t.x * size, y: c.y + t.y * size };
+        const l1 = { x: c.x - t.x * size * 0.6 + nrm.x * size * 0.75, y: c.y - t.y * size * 0.6 + nrm.y * size * 0.75 };
+        const l2 = { x: c.x - t.x * size * 0.6 - nrm.x * size * 0.75, y: c.y - t.y * size * 0.6 - nrm.y * size * 0.75 };
+        prims.push({ t: 'poly', pts: [tip, l1, l2].map(flip), fill, stroke: 'none', sw: 0, layer: 'guide' });
+      };
+      site.forEach((a, i) => {
+        if (i === 0) return;
+        arrow(a, site[(i + 1) % n], 0.5, 5 * u, '#8a8f96');
+      });
+      const A = site[0];
+      const B = site[1 % n];
+      const LAB = dist(A, B);
+      if (LAB > 1e-9) {
+        const t = { x: (B.x - A.x) / LAB, y: (B.y - A.y) / LAB };
+        const s0 = { x: A.x + t.x * Math.min(LAB * 0.12, 14 * u), y: A.y + t.y * Math.min(LAB * 0.12, 14 * u) };
+        const s1 = { x: A.x + t.x * LAB * 0.5, y: A.y + t.y * LAB * 0.5 };
+        prims.push({ t: 'line', a: flip(s0), b: flip(s1), stroke: GUIDE, sw: lw * 2.4, layer: 'guide' });
+        arrow(A, B, 0.5, 8 * u, GUIDE);
+      }
+      prims.push({ t: 'circle', c: flip(A), r: 5.5 * u, fill: GUIDE, stroke: '#ffffff', sw: lw * 1.2, layer: 'guide' });
+      const f = o.guide.focus;
+      if (f) {
+        const HL = 'rgba(0, 140, 150, 0.38)';
+        if (f.kind === 'side' && f.index < n) prims.push({ t: 'line', a: flip(site[f.index]), b: flip(site[(f.index + 1) % n]), stroke: HL, sw: 12 * u, layer: 'focus' });
+        else if (f.kind === 'diagonal' && f.a < n && f.b < n) prims.push({ t: 'line', a: flip(site[f.a]), b: flip(site[f.b]), stroke: HL, sw: 10 * u, layer: 'focus' });
+        else if ((f.kind === 'angle' || f.kind === 'vertex') && f.index < n) prims.push({ t: 'circle', c: flip(site[f.index]), r: 16 * u, fill: HL, stroke: 'none', sw: 0, layer: 'focus' });
+      }
     }
     // 基準点（精密CAD：頂点A）
     if (cad) {

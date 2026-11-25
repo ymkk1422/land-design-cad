@@ -1,13 +1,14 @@
 'use client';
 import type { JSX } from 'react';
 // 土地寸法入力（辺・対角線・角度・座標を同時保持して組み合わせ可能）
-import { useState } from 'react';
-import type { LandInput } from '@/types';
+import { useEffect, useState } from 'react';
+import type { LandFocus, LandInput, SitePreview, Vec2 } from '@/types';
+import { useLandUi } from '@/stores/landUi';
 import { useProject } from '@/stores/projectStore';
 import { AngleInput, Btn, LengthInput, NumInput, Section, Select, cx } from '@/components/ui';
-import { vertexName } from '@/engine/geometry/polygon';
+import { interiorAngles, vertexName } from '@/engine/geometry/polygon';
 import { constraintSummary } from '@/engine/constraints/solver';
-import { formatDMS, landMetrics, m2ToTsubo } from '@/engine/area-calculation';
+import { formatDMS, formatLength, landMetrics, m2ToTsubo } from '@/engine/area-calculation';
 import { currentSite } from '@/engine/export/drawingModel';
 import { resizeLand } from '@/services/projectFactory';
 import { newId } from '@/engine/parking-optimizer/stallOps';
@@ -33,7 +34,25 @@ export function LandPanel(): JSX.Element {
   const n = land.vertexCount;
   const sol = doc.solution;
   const site = currentSite(doc);
-  const met = site ? landMetrics(site) : null;
+  const preview = !site && sol?.preview && sol.preview.points.length >= 3 ? sol.preview : null;
+  const drawSite = site ?? preview?.points ?? null;
+  const met = drawSite ? landMetrics(drawSite) : null;
+  const shownAngles = drawSite ? interiorAngles(drawSite) : null;
+  const setGuide = useLandUi((x) => x.setGuide);
+  const setFocus = useLandUi((x) => x.setFocus);
+  useEffect(() => {
+    setGuide(true);
+    return () => {
+      setGuide(false);
+      setFocus(null);
+    };
+  }, [setGuide, setFocus]);
+  // 入力欄にフォーカスしている間、その辺・角を図面上で強調する
+  const focusProps = (f: LandFocus): { onFocusCapture: () => void; onBlurCapture: () => void } => ({
+    onFocusCapture: () => setFocus(f),
+    onBlurCapture: () => setFocus(null),
+  });
+  const coordCount = land.coords.filter(Boolean).length;
   const { count, required } = constraintSummary(land);
   const upd = (patch: Partial<LandInput>, label: string): void => setLand({ ...land, ...patch }, label);
   const dec = doc.display.decimals;
@@ -58,6 +77,20 @@ export function LandPanel(): JSX.Element {
             条件 {count}/{required}
           </span>
         </div>
+        <div className="mt-2">
+          <Select
+            label="回る向き"
+            testId="vertex-order"
+            value={land.order === 'cw' ? 'cw' : 'ccw'}
+            onChange={(v) => upd({ order: v === 'cw' ? 'cw' : undefined }, '頂点の並び順の変更')}
+            options={[
+              { value: 'ccw', label: '反時計回り（A→B を右へ、左回り）' },
+              { value: 'cw', label: '時計回り（A→B を右へ、右回り）' },
+            ]}
+          />
+          {coordCount >= 3 && <p className="mt-1 text-[12px] text-neutral-500">座標を3点以上入力しているため、回る向きは座標の並びで決まります。</p>}
+        </div>
+        <StartGuide pts={drawSite} n={n} cw={coordCount >= 3 ? (drawSite ? signed(drawSite) < 0 : false) : land.order === 'cw'} />
         <div className="mt-2 grid grid-cols-4 gap-1" role="tablist">
           {(
             [
@@ -83,25 +116,28 @@ export function LandPanel(): JSX.Element {
         <div className="mt-3 space-y-2">
           {tab === 'sides' &&
             land.sides.map((s, i) => (
+              <div key={`s${i}-${n}`} {...focusProps({ kind: 'side', index: i })}>
               <LengthInput
-                key={`s${i}-${n}`}
                 testId={`side-${i}`}
                 label={`${vertexName(i)}${vertexName((i + 1) % n)}`}
                 unit={unit}
                 value={s}
                 min={0.001}
+                allowEmpty
+                placeholder={met && s === null ? `自動 ${formatLength(met.sides[i], unit, 2)}` : '未入力'}
                 onChange={(v) => {
                   const sides = [...land.sides];
                   sides[i] = v;
                   upd({ sides }, `辺${vertexName(i)}${vertexName((i + 1) % n)}の変更`);
                 }}
               />
+              </div>
             ))}
 
           {tab === 'diagonals' && (
             <>
               {land.diagonals.map((d, k) => (
-                <div key={d.id} className="grid grid-cols-[56px_56px_1fr_auto] items-center gap-1">
+                <div key={d.id} className="grid grid-cols-[56px_56px_1fr_auto] items-center gap-1" {...focusProps({ kind: 'diagonal', a: d.a, b: d.b })}>
                   <select
                     aria-label="始点"
                     className="h-10 rounded border border-neutral-300 bg-white text-[16px]"
@@ -165,28 +201,30 @@ export function LandPanel(): JSX.Element {
           {tab === 'angles' && (
             <>
               {land.angles.map((a, i) => (
+                <div key={`a${i}-${n}`} {...focusProps({ kind: 'angle', index: i })}>
                 <AngleInput
-                  key={`a${i}-${n}`}
                   testId={`angle-${i}`}
                   label={vertexName(i)}
                   value={a}
                   allowEmpty
                   digits={6}
+                  placeholder={shownAngles && a === null ? `自動 ${formatDMS(shownAngles[i])}` : '未入力'}
                   onChange={(v) => {
                     const angles = [...land.angles];
                     angles[i] = v;
                     upd({ angles }, `角${vertexName(i)}の変更`);
                   }}
                 />
+                </div>
               ))}
-              <p className="text-[12px] text-neutral-500">内角を入力。90.5 / 90°30′00″ / 90-30-00 / 90度30分 の形式に対応。</p>
+              <p className="text-[12px] text-neutral-500">内角（土地の内側の角度）を入力。90.5 / 90°30′00″ / 90-30-00 / 90度30分 の形式に対応。空欄の角は自動で調整されます。</p>
             </>
           )}
 
           {tab === 'coords' && (
             <>
               {land.coords.map((c, i) => (
-                <div key={`c${i}-${n}`} className="grid grid-cols-[28px_1fr_1fr_auto] items-center gap-1">
+                <div key={`c${i}-${n}`} className="grid grid-cols-[28px_1fr_1fr_auto] items-center gap-1" {...focusProps({ kind: 'vertex', index: i })}>
                   <span className="text-[13px] font-bold">{vertexName(i)}</span>
                   <NumInput
                     testId={`coord-x-${i}`}
@@ -259,6 +297,7 @@ export function LandPanel(): JSX.Element {
             ))}
           </div>
         )}
+        {preview && <PreviewActions preview={preview} />}
         {sol && sol.candidates.length > 1 && (
           <div className="mt-2">
             <div className="text-[13px] font-bold">形状候補を選択</div>
@@ -282,8 +321,8 @@ export function LandPanel(): JSX.Element {
         {met && (
           <div className="mt-3" data-testid="metrics">
             <div className="grid grid-cols-2 gap-2">
-              <Stat label="面積" value={`${met.area.toFixed(dec)}㎡`} sub={`${m2ToTsubo(met.area).toFixed(dec)}坪`} testId="area" />
-              <Stat label="外周" value={`${met.perimeter.toFixed(dec)}m`} sub={`${met.sides.length}辺`} testId="perimeter" />
+              <Stat label={preview ? '面積（仮の形）' : '面積'} value={`${met.area.toFixed(dec)}㎡`} sub={`${m2ToTsubo(met.area).toFixed(dec)}坪`} testId="area" />
+              <Stat label={preview ? '外周（仮の形）' : '外周'} value={`${met.perimeter.toFixed(dec)}m`} sub={`${met.sides.length}辺`} testId="perimeter" />
             </div>
             <table className="mt-2 w-full text-[13px] tabular-nums">
               <thead>
@@ -310,12 +349,12 @@ export function LandPanel(): JSX.Element {
             </table>
           </div>
         )}
-        {sol && sol.candidates[0] && sol.candidates[0].residuals.length > 0 && (sol.status === 'approximate' || sol.status === 'inconsistent') && (
-          <details className="mt-2 text-[12px]" open={sol.status === 'inconsistent'}>
-            <summary className="cursor-pointer font-bold">誤差の内訳</summary>
+        {sol && (preview?.kind === 'mismatch' || (sol.candidates[0] && sol.candidates[0].residuals.length > 0 && sol.status === 'approximate')) && (
+          <details className="mt-2 text-[12px]" open={!!preview} data-testid="residual-table">
+            <summary className="cursor-pointer font-bold">誤差の内訳（入力値と図上の値の差）</summary>
             <table className="mt-1 w-full tabular-nums">
               <tbody>
-                {[...sol.candidates[Math.min(doc.selectedCandidate, sol.candidates.length - 1)].residuals]
+                {[...(preview?.kind === 'mismatch' ? preview.residuals : sol.candidates[Math.min(doc.selectedCandidate, sol.candidates.length - 1)].residuals)]
                   .sort((a, b) => Math.abs(b.error) - Math.abs(a.error))
                   .map((r, i) => (
                     <tr key={i} className="border-t border-neutral-100">
@@ -358,5 +397,150 @@ export function MiniPoly({ pts }: { pts: { x: number; y: number }[] }): JSX.Elem
     <svg viewBox="0 0 60 60" className="mx-auto h-14 w-14">
       <polygon points={pts.map((p) => `${5 + (p.x - minX) * s},${55 - (p.y - minY) * s}`).join(' ')} fill="#e6f1f1" stroke="#0b5d63" strokeWidth="1.5" />
     </svg>
+  );
+}
+
+function signed(pts: Vec2[]): number {
+  let a = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i], q = pts[(i + 1) % pts.length];
+    a += (p.x - pts[0].x) * (q.y - pts[0].y) - (q.x - pts[0].x) * (p.y - pts[0].y);
+  }
+  return a / 2;
+}
+
+/** 始点Aと回る向きの説明（形が無いときは見本の形で示す） */
+function StartGuide({ pts, n, cw }: { pts: Vec2[] | null; n: number; cw: boolean }): JSX.Element {
+  // 見本：正多角形（A を左下、AB を右向き）
+  const sample = (): Vec2[] => {
+    const out: Vec2[] = [{ x: 0, y: 0 }];
+    let h = 0;
+    for (let i = 1; i < n; i++) {
+      out.push({ x: out[i - 1].x + Math.cos(h), y: out[i - 1].y + Math.sin(h) });
+      h += ((cw ? -1 : 1) * 2 * Math.PI) / n;
+    }
+    return out;
+  };
+  const P = pts && pts.length === n ? pts : sample();
+  const xs = P.map((p) => p.x), ys = P.map((p) => p.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+  const k = 64 / Math.max(maxX - minX, maxY - minY, 1e-6);
+  const W = (maxX - minX) * k + 28, H = (maxY - minY) * k + 28;
+  const T = (p: Vec2): [number, number] => [14 + (p.x - minX) * k, H - 14 - (p.y - minY) * k];
+  const cxp = P.reduce((a, p) => a + p.x, 0) / n, cyp = P.reduce((a, p) => a + p.y, 0) / n;
+  const [ax, ay] = T(P[0]);
+  const [bx, by] = T(P[1 % n]);
+  const mx = ax + (bx - ax) * 0.55, my = ay + (by - ay) * 0.55;
+  const ang = Math.atan2(by - ay, bx - ax);
+  const order = Array.from({ length: Math.min(n, 4) }, (_, i) => vertexName(i)).join('→');
+  return (
+    <div className="mt-2 flex items-center gap-3 rounded-md border border-neutral-200 bg-white px-2 py-2" data-testid="start-guide">
+      <svg viewBox={`0 0 ${W} ${H}`} className="h-[84px] w-[96px] shrink-0" aria-hidden>
+        <polygon points={P.map((p) => T(p).join(',')).join(' ')} fill="#eef5f5" stroke="#0b5d63" strokeWidth={1.4} strokeDasharray={pts ? undefined : '3 2'} />
+        <line x1={ax} y1={ay} x2={mx} y2={my} stroke="#1d4ed8" strokeWidth={2.4} />
+        <polygon points="0,-4 8,0 0,4" fill="#1d4ed8" transform={`translate(${mx} ${my}) rotate(${(ang * 180) / Math.PI})`} />
+        <circle cx={ax} cy={ay} r={4} fill="#1d4ed8" stroke="#fff" strokeWidth={1} />
+        {P.map((p, i) => {
+          const [x, y] = T(p);
+          const [cx0, cy0] = T({ x: cxp, y: cyp });
+          const dx = x - cx0, dy = y - cy0, l = Math.hypot(dx, dy) || 1;
+          return (
+            <text key={i} x={x + (dx / l) * 9} y={y + (dy / l) * 9 + 3.5} fontSize={i === 0 ? 11 : 9.5} fontWeight={i === 0 ? 700 : 500} textAnchor="middle" fill={i === 0 ? '#1d4ed8' : '#14161a'}>
+              {vertexName(i)}
+            </text>
+          );
+        })}
+      </svg>
+      <div className="text-[12px] leading-snug text-neutral-700">
+        <div className="font-bold text-ink">
+          <span className="text-[#1d4ed8]">A</span> が始点、{order}{n > 4 ? '…' : ''} の順に{cw ? '時計回り（右回り）' : '反時計回り（左回り）'}
+        </div>
+        <div className="mt-0.5">辺「AB」は A から B まで。図面の青い矢印が A→B の向きです。入力中の辺は図面で水色に光ります。</div>
+        {!pts && <div className="mt-0.5 text-neutral-500">（図は見本です）</div>}
+      </div>
+    </div>
+  );
+}
+
+/** 仮の形のときの操作（自動調整した形の確定・合わない寸法の修正） */
+function PreviewActions({ preview }: { preview: SitePreview }): JSX.Element {
+  const doc = useProject((x) => x.doc)!;
+  const setLand = useProject((x) => x.setLand);
+  const land = doc.land;
+  const n = land.vertexCount;
+  const pts = preview.points;
+  const angs = interiorAngles(pts);
+  const r6 = (v: number): number => Math.round(v * 1e6) / 1e6;
+  const c = preview.conflict;
+  const kindName = (k: string): string => (k === 'side' ? '辺' : k === 'diagonal' ? '対角線' : k === 'angle' ? '角' : '座標');
+  const fixConflict = (mode: 'replace' | 'remove'): void => {
+    if (!c) return;
+    let next: LandInput = land;
+    if (c.kind === 'side') {
+      const i = land.sides.findIndex((_, j) => `${vertexName(j)}${vertexName((j + 1) % n)}` === c.label);
+      if (i < 0) return;
+      next = { ...land, sides: land.sides.map((v, j) => (j === i ? (mode === 'replace' ? r6(c.actual) : null) : v)) };
+    } else if (c.kind === 'diagonal') {
+      const k = land.diagonals.findIndex((d) => `${vertexName(d.a)}${vertexName(d.b)}` === c.label);
+      if (k < 0) return;
+      next = { ...land, diagonals: mode === 'replace' ? land.diagonals.map((d, j) => (j === k ? { ...d, length: r6(c.actual) } : d)) : land.diagonals.filter((_, j) => j !== k) };
+    } else if (c.kind === 'angle') {
+      const i = land.angles.findIndex((_, j) => vertexName(j) === c.label);
+      if (i < 0) return;
+      next = { ...land, angles: land.angles.map((v, j) => (j === i ? (mode === 'replace' ? r6(c.actual) : null) : v)) };
+    } else return;
+    setLand(next, `${kindName(c.kind)}${c.label}の修正`);
+  };
+  if (preview.kind === 'auto') {
+    return (
+      <div className="mt-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-[13px] text-amber-900" data-testid="preview-auto">
+        <div className="font-bold">仮の形を表示中（角度を自動調整）</div>
+        <p className="mt-1 text-[12px]">
+          自動で決めた値：
+          {[...preview.autoAngles.map((i) => `角${vertexName(i)} ${formatDMS(angs[i])}`), ...preview.autoSides.map((i) => `辺${vertexName(i)}${vertexName((i + 1) % n)} ${Math.hypot(pts[(i + 1) % n].x - pts[i].x, pts[(i + 1) % n].y - pts[i].y).toFixed(2)}m`)].join('、')}
+        </p>
+        <p className="mt-1 text-[12px]">現地と同じ形なら確定してください。違う場合は、分かっている角度か対角線を入力すると形が変わります。</p>
+        <Btn
+          className="mt-2 w-full"
+          testId="accept-preview"
+          onClick={() =>
+            setLand(
+              {
+                ...land,
+                angles: land.angles.map((a, i) => (a === null ? r6(angs[i]) : a)),
+                sides: land.sides.map((v, i) => (v === null ? r6(Math.hypot(pts[(i + 1) % n].x - pts[i].x, pts[(i + 1) % n].y - pts[i].y)) : v)),
+              },
+              '自動調整した形で確定',
+            )
+          }
+        >
+          この形で確定（自動の値を入力欄に反映）
+        </Btn>
+      </div>
+    );
+  }
+  return (
+    <div className="mt-2 rounded-md border border-signal bg-red-50 px-3 py-2 text-[13px] text-signal" data-testid="preview-mismatch">
+      <div className="font-bold">寸法が合っていません（仮の形を表示中）</div>
+      {c ? (
+        <>
+          <p className="mt-1 text-[12px] text-ink">
+            {kindName(c.kind)}
+            <b>{c.label}</b> が合いません。入力 {c.kind === 'angle' ? formatDMS(c.target) : `${c.target.toFixed(3)}m`} ／ 他の寸法から求めた値 {c.kind === 'angle' ? formatDMS(c.actual) : `${c.actual.toFixed(3)}m`}。
+            入力ミスか、頂点の順番（どの角がAか・回る向き）が違う可能性があります。
+          </p>
+          <div className="mt-2 grid grid-cols-2 gap-2">
+            <Btn testId="conflict-replace" onClick={() => fixConflict('replace')}>
+              {c.kind === 'angle' ? formatDMS(c.actual) : `${c.actual.toFixed(2)}m`} に直す
+            </Btn>
+            <Btn variant="ghost" testId="conflict-remove" onClick={() => fixConflict('remove')}>
+              {c.kind === 'diagonal' ? 'この対角線を削除' : '未入力に戻す'}
+            </Btn>
+          </div>
+        </>
+      ) : (
+        <p className="mt-1 text-[12px] text-ink">合わない寸法が複数あります。下の「誤差の内訳」で差の大きい寸法から確認してください。</p>
+      )}
+    </div>
   );
 }

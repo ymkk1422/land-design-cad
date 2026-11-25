@@ -145,6 +145,50 @@ test('PDF・PNG出力', async ({ page }) => {
   expect(ph).toBe('PNG');
 });
 
+test('寸法不足・不一致でも仮の形を表示し、確定・修正できる', async ({ page }) => {
+  await newProject(page);
+  await expect(page.getByTestId('start-guide')).toContainText('反時計回り');
+  // 対角線を消す → 寸法不足：角度を自動調整した仮の形
+  await page.getByTestId('land-tab-diagonals').click();
+  await page.getByTitle('対角線を削除').click();
+  await expect(page.getByTestId('solve-status')).toHaveAttribute('data-status', 'underdetermined');
+  await expect(page.getByTestId('preview-banner')).toHaveAttribute('data-kind', 'auto');
+  await expect(page.getByTestId('preview-auto')).toContainText('角A 90°00′00.0″');
+  await expect(page.getByTestId('area')).toHaveText('300.00㎡');
+  // 図面に仮の形（破線の敷地）が描かれている
+  await expect(page.locator('[data-testid="drawing-svg"] polygon[stroke="#b45309"]').first()).toBeVisible();
+  // 合わない対角線 → どの寸法が合わないかを表示し、ワンタップで直せる
+  await page.getByTestId('add-diagonal').click();
+  await fill(page, 'diag-0', '40');
+  await expect(page.getByTestId('solve-status')).toHaveAttribute('data-status', 'inconsistent');
+  await expect(page.getByTestId('preview-banner')).toHaveAttribute('data-kind', 'mismatch');
+  await expect(page.getByTestId('preview-mismatch')).toContainText('AC');
+  await expect(page.getByTestId('preview-mismatch')).toContainText('25.000m');
+  await page.getByTestId('conflict-replace').click();
+  await expect(page.getByTestId('solve-status')).toHaveAttribute('data-status', 'exact');
+  await expect(page.getByTestId('diag-0')).toHaveValue('25');
+  await expect(page.getByTestId('preview-banner')).toHaveCount(0);
+  // 対角線を消して、自動調整の形で確定 → 角度が入力欄に入り、形が確定する
+  await page.getByTitle('対角線を削除').click();
+  await page.getByTestId('accept-preview').click();
+  await expect(page.getByTestId('solve-status')).toHaveAttribute('data-status', 'exact');
+  await page.getByTestId('land-tab-angles').click();
+  await expect(page.getByTestId('angle-0')).toHaveValue(/^90/);
+  // 元に戻すで仮の形に戻る
+  await page.getByTestId('undo').click();
+  await expect(page.getByTestId('solve-status')).toHaveAttribute('data-status', 'underdetermined');
+});
+
+test('回る向き（時計回り）を切り替えると形が左右反転し、案内も変わる', async ({ page }) => {
+  await newProject(page);
+  await page.getByTestId('vertex-order').selectOption('cw');
+  await expect(page.getByTestId('start-guide')).toContainText('時計回り（右回り）');
+  await expect(page.getByTestId('solve-status')).toHaveAttribute('data-status', 'exact');
+  await expect(page.getByTestId('area')).toHaveText('300.00㎡');
+  await page.getByTestId('vertex-order').selectOption('ccw');
+  await expect(page.getByTestId('start-guide')).toContainText('反時計回り');
+});
+
 test('PDFの実寸：用紙寸法と縮尺バーの長さをPDFから実測する（A3・1/200）', async ({ page }) => {
   const cspErrors: string[] = [];
   page.on('console', (m) => {

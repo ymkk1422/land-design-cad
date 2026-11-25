@@ -16,6 +16,7 @@ import { UnderlayImage, UnderlayOverlay } from '@/components/underlay/UnderlayLa
 import { placeUnderlayPoint } from '@/components/underlay/actions';
 import { keepPivot, pxDist, pxToWorld, worldToPx } from '@/engine/underlay/transform';
 import { useUnderlayUi } from '@/stores/underlayUi';
+import { useLandUi } from '@/stores/landUi';
 
 interface View {
   cx: number;
@@ -73,10 +74,11 @@ function renderPrim(p: Prim, k: number, view: View): JSX.Element | null {
     return <circle key={k} cx={p.c.x} cy={p.c.y} r={p.r} fill={p.fill} stroke={p.stroke} strokeWidth={p.sw} {...hit} pointerEvents={p.id ? 'all' : 'none'} />;
   }
   // 文字は画面回転に対して読みやすい向きを保つ
-  let rot = (p.rot ?? 0) + 0;
-  const total = rot + view.rot;
-  if (total > 90 || total < -90) rot += 180;
-  if (total > 270) rot -= 360;
+  // 文字が逆さまにならないよう、画面上の角度を -180〜180° に正規化してから判定する
+  const norm = (a: number): number => ((((a + 180) % 360) + 360) % 360) - 180;
+  let rot = norm(p.rot ?? 0);
+  const total = norm(rot + view.rot);
+  if (total > 90 || total < -90) rot = norm(rot + 180);
   return (
     <text
       key={k}
@@ -106,6 +108,11 @@ export function DrawingCanvas({ problems }: { problems: Set<string> }): JSX.Elem
   const [size, setSize] = useState({ w: 800, h: 600 });
   const [view, setView] = useState<View>({ cx: 10, cy: -7, s: 20, rot: 0 });
   const site = currentSite(doc);
+  // 形状が確定していない場合の仮の形（表示のみ。操作・計算・出力には使わない）
+  const preview = !site && doc.solution?.preview && doc.solution.preview.points.length >= 3 ? doc.solution.preview : null;
+  const drawSite = site ?? preview?.points ?? null;
+  const guideOn = useLandUi((s) => s.guide);
+  const focus = useLandUi((s) => s.focus);
   const fitted = useRef<string | null>(null);
 
   useEffect(() => {
@@ -118,12 +125,12 @@ export function DrawingCanvas({ problems }: { problems: Set<string> }): JSX.Elem
   }, []);
 
   const fit = useCallback(() => {
-    const e = { ...modelExtent(doc, site) };
+    const e = { ...modelExtent(doc, drawSite) };
     // 下絵を表示中は画像全体も収める
     const u = doc.underlay;
     if (u && u.visible) {
       const cs = [{ u: 0, v: 0 }, { u: u.pxWidth, v: 0 }, { u: u.pxWidth, v: u.pxHeight }, { u: 0, v: u.pxHeight }].map((q) => pxToWorld(u, q));
-      const hasModel = !!site || doc.stalls.length > 0;
+      const hasModel = !!drawSite || doc.stalls.length > 0;
       if (!hasModel) Object.assign(e, { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
       for (const c of cs) {
         e.minX = Math.min(e.minX, c.x);
@@ -138,12 +145,14 @@ export function DrawingCanvas({ problems }: { problems: Set<string> }): JSX.Elem
     // 小さい画面（パネル表示中のiPhone SEなど）では余白を縮める
     // 案内バナー（高さ48px・上端8px）表示中はその下から、通常は方位マーク・縮尺バーの下から
     const bannerShown = st.tool.startsWith('ul') || st.tool.startsWith('add');
-    const padTop = bannerShown ? Math.min(64, size.h * 0.22) : Math.min(112, size.h * 0.16);
+    // 形が未確定のときは上部の案内（2行）の下から
+    const padTop = !site ? (size.h < 460 ? 84 : 124) : bannerShown ? Math.min(64, size.h * 0.22) : Math.min(112, size.h * 0.16);
     const padBottom = Math.min(76, size.h * 0.12);
-    const s = Math.max(0.3, Math.min((size.w - 32) / w, Math.max(40, size.h - padTop - padBottom) / h));
+    // 左右は頂点名・寸法の文字がはみ出さないよう余白を取る
+    const s = Math.max(0.3, Math.min((size.w - Math.min(110, size.w * 0.22)) / w, Math.max(40, size.h - padTop - padBottom) / h));
     const cyShift = ((padTop - padBottom) / 2) / s;
     setView({ cx: (e.minX + e.maxX) / 2, cy: (e.minY + e.maxY) / 2 - cyShift, s, rot: 0 });
-  }, [doc, site, size, st.tool]);
+  }, [doc, site, drawSite, size, st.tool]);
 
   // 初回・画面サイズ変更時（ユーザーが視点を動かすまで）は全体表示に合わせる
   const userMoved = useRef(false);
@@ -183,7 +192,28 @@ export function DrawingCanvas({ problems }: { problems: Set<string> }): JSX.Elem
   const textUnit = Math.exp(Math.round(Math.log(1 / view.s) / 0.12) * 0.12);
   const highlight = useMemo(() => new Set(st.selIds), [st.selIds]);
   const seeThrough = !!(doc.underlay && doc.underlay.visible);
-  const prims = useMemo(() => buildModel(doc, { mode: doc.mode, textUnit, sitePoints: site, highlight, problems, seeThrough }), [doc, textUnit, site, highlight, problems, seeThrough]);
+  const guide = useMemo(() => {
+    if (!guideOn) return null;
+    const f = focus && focus.kind === 'diagonal' && !doc.land.diagonals.some((d) => (d.a === focus.a && d.b === focus.b) || (d.a === focus.b && d.b === focus.a)) ? null : focus;
+    return { focus: f };
+  }, [guideOn, focus, doc.land.diagonals]);
+  const prims = useMemo(
+    () => buildModel(doc, { mode: doc.mode, textUnit, sitePoints: drawSite, highlight, problems, seeThrough, preview, guide }),
+    [doc, textUnit, drawSite, highlight, problems, seeThrough, preview, guide],
+  );
+  // 形が大きく変わったとき（仮の形が出た・寸法で大きさが変わった等）は、視点を動かしていなければ全体表示し直す
+  const shapeKey = drawSite ? (() => {
+    const xs = drawSite.map((p) => p.x), ys = drawSite.map((p) => p.y);
+    const q = (v: number): number => Math.round(v / Math.max(1, (Math.max(...xs) - Math.min(...xs) + Math.max(...ys) - Math.min(...ys)) / 8));
+    return [q(Math.min(...xs)), q(Math.max(...xs)), q(Math.min(...ys)), q(Math.max(...ys)), drawSite.length].join(',');
+  })() : '';
+  const lastShapeKey = useRef(shapeKey);
+  useEffect(() => {
+    if (lastShapeKey.current === shapeKey) return;
+    lastShapeKey.current = shapeKey;
+    if (!userMoved.current && size.w >= 50) fit();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shapeKey]);
 
   // 画面 ↔ 表示空間
   const toDisp = useCallback(
@@ -737,9 +767,24 @@ export function DrawingCanvas({ problems }: { problems: Set<string> }): JSX.Elem
           <span className="font-mono">{niceM}m</span>
         </div>
       </div>
-      {!site && (
-        <div className="pointer-events-none absolute inset-x-4 top-16 mx-auto max-w-md rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-[13px] text-amber-900">
-          土地形状がまだ確定していません。寸法を入力してください（形状が一意に定まるまで図面は生成されません）。
+      {!site && !(focus && size.h < 460) && (
+        <div
+          className={`pointer-events-none absolute inset-x-4 top-12 mx-auto max-w-md rounded-md border px-3 py-1.5 text-[12px] leading-snug shadow-sm ${preview?.kind === 'mismatch' ? 'border-signal bg-red-50/95 text-signal' : 'border-amber-300 bg-amber-50/95 text-amber-900'}`}
+          data-testid="preview-banner"
+          data-kind={preview?.kind ?? 'none'}
+        >
+          {size.h < 460
+            ? // 図面が狭いとき（入力パネル表示中のiPhoneなど）は1行に縮める
+              !preview
+              ? '形状が未確定です'
+              : preview.kind === 'auto'
+                ? '仮の形：角度を自動調整中（灰色＝自動の値）'
+                : '仮の形：寸法が合いません（赤＝合わない寸法）'
+            : !preview
+              ? '土地形状がまだ確定していません。寸法を入力してください。'
+              : preview.kind === 'auto'
+                ? '仮の形（破線）：寸法が足りないため、未入力の角度を自動で調整しています。灰色の値が自動で決めた寸法です。'
+                : '仮の形（破線）：寸法が合っていません。赤い寸法が「図上の長さ／入力値」です。'}
         </div>
       )}
     </div>

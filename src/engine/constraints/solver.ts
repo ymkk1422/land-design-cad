@@ -3,7 +3,7 @@
 // - 自由度（ヤコビ行列のランク）で形状が一意に決まるかを判定
 // - マルチスタート探索で複数解（凹凸の反転・折り返し）と鏡像を検出
 // - 残差で厳密解／近似解（測量誤差内）／矛盾を区別
-import type { ConstraintResidual, LandInput, SolutionCandidate, SolveResult, Vec2 } from '@/types';
+import type { ConstraintResidual, LandInput, SitePreview, SolutionCandidate, SolveResult, Vec2 } from '@/types';
 import {
   deg,
   dist,
@@ -295,7 +295,7 @@ function toPoints(X: number[]): Vec2[] {
 }
 
 /** ゲージ固定時の鏡像を反時計回りへ正規化 */
-function normalizeOrientation(input: Vec2[], land: LandInput): Vec2[] {
+function normalizeOrientation(input: Vec2[], land: LandInput, ccw = true): Vec2[] {
   const k = land.coords.filter(Boolean).length;
   if (k >= 2) return input; // 座標で向きが確定
   let pts = input;
@@ -308,7 +308,7 @@ function normalizeOrientation(input: Vec2[], land: LandInput): Vec2[] {
       pts = pts.map((p) => ({ x: 2 * o.x - p.x, y: 2 * o.y - p.y }));
     }
   }
-  if (signedArea(pts) >= 0) return pts;
+  if ((signedArea(pts) >= 0) === ccw) return pts;
   const hasAngles = land.angles.some((a) => a !== null);
   if (hasAngles) return pts; // 角度は向き依存なので解として扱わない（後で残差で除外）
   const ci = k === 1 ? land.coords.findIndex(Boolean) : 0;
@@ -373,8 +373,8 @@ export function solveLand(land: LandInput, opts: SolveOptions = {}): SolveResult
   if (!givenLengths.length && coordPts.length >= 2) meanSide = dist(coordPts[0], coordPts[1]);
   const lengthScale = Math.max(meanSide, 1e-3);
 
-  // 向き：座標3点以上なら与えられた順序の向き、それ以外は反時計回り
-  let ccw = true;
+  // 向き：座標3点以上なら与えられた順序の向き、それ以外は指定の並び順（既定：反時計回り）
+  let ccw = land.order !== 'cw';
   if (coordPts.length >= 3) {
     const ordered = land.coords.map((c, i) => (c ? { ...c, i } : null)).filter(Boolean) as (Vec2 & { i: number })[];
     ccw = signedArea(ordered) >= 0;
@@ -388,7 +388,9 @@ export function solveLand(land: LandInput, opts: SolveOptions = {}): SolveResult
     messages.unshift(
       `形状を確定するには独立した寸法があと${missing}個必要です（現在${count}個／必要${required}個）。対角線・角度・座標のいずれかを追加してください。`,
     );
-    return { status: 'underdetermined', candidates: [], missingConstraints: missing, constraintCount: count, rank: 0, messages, solvedAt };
+    const preview = autoPreview(land, ccw, lengthScale, meanSide, opts.hint ?? null);
+    if (preview) messages.push(previewMessage(preview, n));
+    return { status: 'underdetermined', candidates: [], missingConstraints: missing, constraintCount: count, rank: 0, messages, solvedAt, preview };
   }
 
   const starts = opts.starts ?? Math.min(80, 24 + 6 * n);
@@ -417,12 +419,12 @@ export function solveLand(land: LandInput, opts: SolveOptions = {}): SolveResult
     } else {
       X0 = traverseInitial(land, rand, 40 + (s % 3) * 25, meanSide);
     }
-    if (!(s === 0 && hint)) X0 = placeCoords(X0, land);
+    if (!(s === 0 && hint)) X0 = placeCoords(ccw ? X0 : mirrorY(X0), land);
     const r = levenbergMarquardt(rows, X0, maxIter);
     raw.push(r);
     const rms = Math.sqrt(r.cost / Math.max(1, rows.length));
     if (rms <= exactTolEarly * 10) {
-      const sig = pairwiseSignature(normalizeOrientation(toPoints(r.X), land));
+      const sig = pairwiseSignature(normalizeOrientation(toPoints(r.X), land, ccw));
       if (!foundSig.some((f) => f.every((v, k) => Math.abs(v - sig[k]) < 1e-5 * lengthScale))) {
         foundSig.push(sig);
         lastProgress = s;
@@ -457,11 +459,13 @@ export function solveLand(land: LandInput, opts: SolveOptions = {}): SolveResult
     messages.unshift(
       `寸法の数は足りていますが、一部が従属しているため形状が一意に決まりません（不足${missing}自由度）。別の対角線・角度・座標を追加してください。`,
     );
-    return { status: 'underdetermined', candidates: [], missingConstraints: missing, constraintCount: count, rank, messages, solvedAt };
+    const preview = autoPreview(land, ccw, lengthScale, meanSide, opts.hint ?? null);
+    if (preview) messages.push(previewMessage(preview, n));
+    return { status: 'underdetermined', candidates: [], missingConstraints: missing, constraintCount: count, rank, messages, solvedAt, preview };
   }
 
   const buildCandidate = (X: number[]): SolutionCandidate => {
-    const pts = normalizeOrientation(toPoints(X), land);
+    const pts = normalizeOrientation(toPoints(X), land, ccw);
     const Xn = pts.flatMap((p) => [p.x, p.y]);
     const res = residualReport(rows, Xn);
     const lenErr = res.filter((r) => r.kind !== 'angle').map((r) => Math.abs(r.error));
@@ -551,7 +555,129 @@ export function solveLand(land: LandInput, opts: SolveOptions = {}): SolveResult
     }
   }
 
-  return { status, candidates, missingConstraints: 0, constraintCount: count, rank, messages, solvedAt };
+  let preview: SitePreview | null = null;
+  if (status === 'inconsistent' && candidates[0]) {
+    const c = candidates[0];
+    const p = autoPreview(land, ccw, lengthScale, meanSide, opts.hint ?? null);
+    preview = p && p.conflict ? p : { kind: 'mismatch', points: c.points, residuals: c.residuals, autoAngles: [], autoSides: [], maxError: c.maxError, selfIntersecting: c.selfIntersecting, conflict: null };
+    messages.push(previewMessage(preview, n));
+  }
+  return { status, candidates, missingConstraints: 0, constraintCount: count, rank, messages, solvedAt, preview };
+}
+
+function mirrorY(X: number[]): number[] {
+  return X.map((v, i) => (i % 2 === 1 ? -v : v));
+}
+
+function previewMessage(p: SitePreview, n: number): string {
+  if (p.kind === 'mismatch') {
+    const c = p.conflict;
+    if (c) {
+      const kind = c.kind === 'side' ? '辺' : c.kind === 'diagonal' ? '対角線' : c.kind === 'angle' ? '角' : '座標';
+      const v = (x: number): string => (c.kind === 'angle' ? `${x.toFixed(2)}°` : `${x.toFixed(2)}m`);
+      return `${kind}${c.label}（入力 ${v(c.target)}）を除くと形が成り立ちます。その形を仮に表示しています（図上では ${v(c.actual)}）。${kind}${c.label}の値か、頂点の順番を確認してください。`;
+    }
+    return '入力された寸法どうしが合っていません。最も近い形を仮に表示しています（赤い寸法が合っていない箇所です）。';
+  }
+  const ref = (((n - 2) * 180) / n).toFixed(0);
+  const what = [p.autoAngles.length ? `角度${p.autoAngles.length}か所` : '', p.autoSides.length ? `辺${p.autoSides.length}本` : ''].filter(Boolean).join('・');
+  return `入力した寸法はすべて満たしたまま、未入力の${what}を自動で調整した仮の形を表示しています（未入力の角はなるべく${ref}°${n === 4 ? '＝直角' : ''}に近づけます）。現地の形と違う場合は、角度か対角線を1つずつ追加してください。`;
+}
+
+/**
+ * 寸法不足のときの仮の形。
+ * 入力された寸法（辺・対角線・角度・座標）は満たしたまま、残りの自由度を
+ * 「未入力の内角をなるべく正多角形の角（四角形なら90°）に近づける」「未入力の辺は平均の長さに近づける」
+ * で決める（弱い重みの正則化 → 入力寸法だけで仕上げ計算、の2段階）。
+ */
+export function autoPreview(land: LandInput, ccw: boolean, lengthScale: number, meanSide: number, hint: Vec2[] | null): SitePreview | null {
+  const t0 = Date.now();
+  const first = autoPreviewCore(land, ccw, lengthScale, meanSide, hint);
+  if (!first || first.preview.kind === 'auto') return first?.preview ?? null;
+  // 寸法が合わない：どれか1つの寸法を除くと形が成り立つかを調べる（入力ミスの特定）
+  const n = land.vertexCount;
+  const fullHard = buildRows(land, lengthScale, ccw).rows;
+  const removals: { land: LandInput; key: string }[] = [];
+  land.sides.forEach((v, i) => v !== null && removals.push({ key: `side:${vertexName(i)}${vertexName((i + 1) % n)}`, land: { ...land, sides: land.sides.map((x, j) => (j === i ? null : x)) } }));
+  land.diagonals.forEach((d, k) => removals.push({ key: `diagonal:${vertexName(d.a)}${vertexName(d.b)}`, land: { ...land, diagonals: land.diagonals.filter((_, j) => j !== k) } }));
+  land.angles.forEach((a, i) => a !== null && removals.push({ key: `angle:${vertexName(i)}`, land: { ...land, angles: land.angles.map((x, j) => (j === i ? null : x)) } }));
+  let best: { p: SitePreview; soft: number; key: string } | null = null;
+  for (const r of removals) {
+    if (Date.now() - t0 > 900) break;
+    const q = autoPreviewCore(r.land, ccw, lengthScale, meanSide, hint ?? first.preview.points);
+    if (!q || q.preview.kind !== 'auto') continue;
+    if (!best || q.soft < best.soft) best = { p: q.preview, soft: q.soft, key: r.key };
+  }
+  if (!best) return first.preview;
+  const Xn = best.p.points.flatMap((p) => [p.x, p.y]);
+  const residuals = residualReport(fullHard, Xn);
+  const conflict = residuals.find((r) => `${r.kind}:${r.label}` === best!.key) ?? null;
+  const lenErr = residuals.filter((r) => r.kind !== 'angle').map((r) => Math.abs(r.error));
+  return {
+    ...best.p,
+    kind: 'mismatch',
+    residuals,
+    autoAngles: land.angles.map((a, i) => (a === null ? i : -1)).filter((i) => i >= 0),
+    autoSides: land.sides.map((v, i) => (v === null ? i : -1)).filter((i) => i >= 0),
+    maxError: lenErr.length ? Math.max(...lenErr) : 0,
+    conflict,
+  };
+}
+
+function autoPreviewCore(land: LandInput, ccw: boolean, lengthScale: number, meanSide: number, hint: Vec2[] | null): { preview: SitePreview; soft: number } | null {
+  const n = land.vertexCount;
+  if (n < 3) return null;
+  const ref = ((n - 2) * 180) / n;
+  const autoAngles = land.angles.map((a, i) => (a === null ? i : -1)).filter((i) => i >= 0);
+  const autoSides = land.sides.map((v, i) => (v === null ? i : -1)).filter((i) => i >= 0);
+  const filled: LandInput = { ...land, sides: land.sides.map((v) => v ?? meanSide), angles: land.angles.map((a) => a ?? ref) };
+  const hard = buildRows(land, lengthScale, ccw).rows;
+  const all = buildRows(filled, lengthScale, ccw).rows;
+  const sideLbl = new Set(autoSides.map((i) => `${vertexName(i)}${vertexName((i + 1) % n)}`));
+  const angLbl = new Set(autoAngles.map((i) => vertexName(i)));
+  const weight = (row: Row, w: number): Row => ({
+    ...row,
+    eval: (X) => {
+      const e = row.eval(X);
+      return { r: e.r * w, actual: e.actual, grad: e.grad.map(([k, v]) => [k, v * w] as [number, number]) };
+    },
+  });
+  const soft = all.filter((r) => (r.kind === 'side' && sideLbl.has(r.label)) || (r.kind === 'angle' && angLbl.has(r.label))).map((r) => weight(r, r.kind === 'side' ? 0.05 : 0.2));
+  const stage1 = [...hard, ...soft];
+  const rand = mulberry32(777);
+  const starts: number[][] = [];
+  if (hint && hint.length === n && hint.every((p) => Number.isFinite(p.x) && Number.isFinite(p.y))) starts.push(hint.flatMap((p) => [p.x, p.y]));
+  const base = traverseInitial(filled, () => null, 0, meanSide);
+  starts.push(base);
+  for (let k = 0; k < 5; k++) starts.push(traverseInitial(filled, rand, 15, meanSide));
+  let best: { X: number[]; hard: number; soft: number; si: boolean } | null = null;
+  for (let k = 0; k < starts.length; k++) {
+    const X0 = k === 0 && hint ? starts[0] : placeCoords(ccw ? starts[k] : mirrorY(starts[k]), land);
+    const r1 = levenbergMarquardt(stage1, X0, 150);
+    const r2 = levenbergMarquardt(hard, r1.X, 150);
+    const pts = toPoints(r2.X);
+    const si = isSelfIntersecting(pts);
+    const softCost = costOnly(soft, r2.X);
+    const cand = { X: r2.X, hard: r2.cost, soft: softCost, si };
+    const better = (a: typeof cand, b: typeof cand | null): boolean => {
+      if (!b) return true;
+      if (a.si !== b.si) return !a.si;
+      const tol = 1e-12 * lengthScale * lengthScale + 1e-9 * Math.max(a.hard, b.hard);
+      if (Math.abs(a.hard - b.hard) > Math.max(tol, 1e-10 * lengthScale * lengthScale)) return a.hard < b.hard;
+      return a.soft < b.soft;
+    };
+    if (better(cand, best)) best = cand;
+  }
+  if (!best) return null;
+  const pts = normalizeOrientation(toPoints(best.X), land, ccw);
+  const Xn = pts.flatMap((p) => [p.x, p.y]);
+  const residuals = residualReport(hard, Xn);
+  const lenErr = residuals.filter((r) => r.kind !== 'angle').map((r) => Math.abs(r.error));
+  const angErr = residuals.filter((r) => r.kind === 'angle').map((r) => Math.abs(r.error));
+  const maxError = lenErr.length ? Math.max(...lenErr) : 0;
+  const maxAng = angErr.length ? Math.max(...angErr) : 0;
+  const ok = maxError <= Math.max(land.tolerance, 1e-6 * lengthScale) && maxAng <= 0.01;
+  return { preview: { kind: ok && !best.si ? 'auto' : 'mismatch', points: pts, residuals, autoAngles, autoSides, maxError, selfIntersecting: best.si }, soft: best.soft };
 }
 
 /** 解いた形状が描画可能か */

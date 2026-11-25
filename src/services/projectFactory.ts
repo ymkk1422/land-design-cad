@@ -130,6 +130,7 @@ export function sanitizeLand(raw: unknown): LandInput {
       .map((d) => ({ id: str(d.id, newId('d'), 80), a: d.a as number, b: d.b as number, length: d.length as number })),
     coordinateSystem: { kind: 'local' },
     tolerance: num(raw.tolerance, 0.01, 0, 1),
+    ...(raw.order === 'cw' ? { order: 'cw' as const } : {}),
   };
 }
 

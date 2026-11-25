@@ -36,6 +36,11 @@ export interface LandInput {
   coordinateSystem: CoordinateSystem;
   /** 測量誤差の許容値（m）。これ以内の残差は「近似解（誤差内）」とする */
   tolerance: number;
+  /**
+   * 頂点の並び順（A→B→C…の回る向き）。既定は反時計回り。
+   * 座標を3点以上入力した場合は座標の並びが優先される。
+   */
+  order?: 'ccw' | 'cw';
 }
 
 export type SolveStatus =
@@ -73,6 +78,27 @@ export interface SolveResult {
   rank: number;
   messages: string[];
   solvedAt: string;
+  /**
+   * 形状が確定しない場合の「途中経過」の形（図面には仮の形として表示し、駐車場計算・出力には使わない）。
+   * auto: 寸法不足を角度の自動調整で補った形（入力寸法はすべて満たす）
+   * mismatch: 入力寸法が互いに合わないため、最も近い形（どの寸法がどれだけ合わないかを residuals に持つ）
+   */
+  preview?: SitePreview | null;
+}
+
+export interface SitePreview {
+  kind: 'auto' | 'mismatch';
+  points: Vec2[];
+  residuals: ConstraintResidual[];
+  /** 角度を自動で決めた頂点 */
+  autoAngles: number[];
+  /** 長さを自動で決めた辺（未入力の辺） */
+  autoSides: number[];
+  /** 長さ系の最大誤差（m） */
+  maxError: number;
+  selfIntersecting: boolean;
+  /** 合わない寸法が1つに絞れた場合：その寸法を除くと形が成り立つ */
+  conflict?: ConstraintResidual | null;
 }
 
 // ===== 駐車場 =====
@@ -344,3 +370,6 @@ export interface ProjectSummary {
   updatedAt: string;
   thumbnail?: string; // SVG 文字列
 }
+
+/** 土地入力中に強調する箇所（入力中の辺・対角線・角） */
+export type LandFocus = { kind: 'side' | 'angle' | 'vertex'; index: number } | { kind: 'diagonal'; a: number; b: number };
